@@ -21,8 +21,8 @@ name = "whatrust_helper"
 path = "src/helper.rs"
 
 [dependencies]
-cef = { version = "145", features = ["sandbox"] }
-cef-dll-sys = "145"
+cef = { version = "151.8.1", features = ["sandbox"] }
+cef-dll-sys = "151.8.1"
 winit = "0.30"
 tray-icon = "0.21"
 muda = "0.17"

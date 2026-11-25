@@ -208,9 +208,9 @@ wrap_permission_handler! {
             let allow = origin.starts_with("https://web.whatsapp.com");
             if let Some(cb) = callback {
                 if allow {
-                    cb.continue_(requested_permissions);
+                    cb.cont(requested_permissions);
                 } else {
-                    cb.continue_(0);
+                    cb.cont(0);
                 }
             }
             1
