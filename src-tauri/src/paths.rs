@@ -6,7 +6,7 @@ pub fn app_data_dir() -> PathBuf {
 }
 
 pub fn config_dir() -> PathBuf {
-    let base = dirs::config_dir().or_else(|| app_data_dir()).unwrap_or_else(|| PathBuf::from("."));
+    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("whatRust")
 }
 
