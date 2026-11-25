@@ -3,16 +3,26 @@ use std::sync::{Arc, Mutex};
 
 use crate::app::SharedState;
 
+/// Keeps the CEF framework loaded for the lifetime of the process.
+/// Dropping the loader on macOS unloads libcef, so the main binary must
+/// hold this value until after `shutdown()`.
+#[cfg(target_os = "macos")]
+pub struct Library(library_loader::LibraryLoader);
+#[cfg(not(target_os = "macos"))]
 pub struct Library;
 
 pub fn load_cef() -> Library {
     #[cfg(target_os = "macos")]
-    {
+    let library = {
         let loader = library_loader::LibraryLoader::new(&std::env::current_exe().unwrap(), false);
-        assert!(loader.load());
-    }
+        assert!(loader.load(), "failed to load Chromium Embedded Framework");
+        Library(loader)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let library = Library;
+
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
-    Library
+    library
 }
 
 wrap_app! {

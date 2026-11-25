@@ -43,7 +43,7 @@ fn main() {
     let res = exe_dir.to_string_lossy().to_string();
     let locales = exe_dir.join("locales").to_string_lossy().to_string();
 
-    let settings = Settings {
+    let mut settings = Settings {
         no_sandbox: !cfg!(feature = "sandbox") as _,
         windowless_rendering_enabled: 0,
         external_message_pump: 0,
@@ -51,11 +51,21 @@ fn main() {
         log_severity: LogSeverity::WARNING,
         root_cache_path: cache_str.as_str().into(),
         cache_path: cache_str.as_str().into(),
-        resources_dir_path: res.as_str().into(),
-        locales_dir_path: locales.as_str().into(),
         persist_session_cookies: 1,
         ..Default::default()
     };
+
+    // macOS resolves resources/locales from inside
+    // `Chromium Embedded Framework.framework/Resources` automatically and
+    // finds the helper apps in `Contents/Frameworks`. Pointing these at
+    // `Contents/MacOS` would prevent CEF from starting.
+    #[cfg(not(target_os = "macos"))]
+    {
+        settings.resources_dir_path = res.as_str().into();
+        settings.locales_dir_path = locales.as_str().into();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = (res, locales);
 
     let mut app = browser::BrowserApp::new(app::state());
     assert_eq!(

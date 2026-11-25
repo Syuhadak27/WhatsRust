@@ -49,10 +49,10 @@ jobs:
             target: aarch64-apple-darwin
             cef_platform: macosarm64
             artifact: whatRust-macos-arm64
-          - runner: macos-26-intel
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             cef_platform: macosx64
-            artifact: whatRust-macos-x64
+            artifact: whatRust-macos-x64-ventura
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             cef_platform: linux64
@@ -129,12 +129,18 @@ jobs:
           MACOS="$APP/Contents/MacOS"
           FW="$APP/Contents/Frameworks"
           RES="$APP/Contents/Resources"
+          BIN="src-tauri/target/${{ matrix.target }}/release"
+          rm -rf "$APP"
           mkdir -p "$MACOS" "$FW" "$RES"
-          cp "src-tauri/target/${{ matrix.target }}/release/whatrust" "$MACOS/whatRust"
-          cp "src-tauri/target/${{ matrix.target }}/release/whatrust_helper" "$MACOS/whatRust Helper" || true
-          cp -R "$CEF_PATH/Release/"* "$FW/" || true
-          cp -R "$CEF_PATH/Resources/"* "$RES/" || true
-          cp src-tauri/icons/icon.icns "$RES/icon.icns" || true
+          cp "$BIN/whatrust" "$MACOS/whatRust"
+
+          # CEF on macOS ships as a framework bundle. Its own Resources
+          # (pak files, locales, icudtl.dat) live inside the framework, so
+          # only the app icon goes into Contents/Resources here.
+          test -d "$CEF_PATH/Release/Chromium Embedded Framework.framework"
+          cp -R "$CEF_PATH/Release/Chromium Embedded Framework.framework" "$FW/"
+          cp src-tauri/icons/icon.icns "$RES/icon.icns"
+
           cat > "$APP/Contents/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -145,34 +151,50 @@ jobs:
             <key>CFBundleExecutable</key><string>whatRust</string>
             <key>CFBundleIconFile</key><string>icon.icns</string>
             <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
             <key>CFBundleShortVersionString</key><string>0.7.0</string>
             <key>CFBundleVersion</key><string>0.7.0</string>
             <key>LSMinimumSystemVersion</key><string>13.0</string>
+            <key>LSFileQuarantineEnabled</key><false/>
+            <key>LSEnvironment</key><dict><key>MallocNanoZone</key><string>0</string></dict>
             <key>NSHighResolutionCapable</key><true/>
+            <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
             <key>NSMicrophoneUsageDescription</key><string>whatRust needs microphone access for WhatsApp voice calls and voice notes.</string>
             <key>NSCameraUsageDescription</key><string>whatRust needs camera access for WhatsApp video calls and camera features.</string>
           </dict></plist>
           PLIST
-          # CEF helper bundles on macOS
+
+          # CEF sub-process helpers. Names must match the CEF defaults:
+          # <AppName> Helper[ (GPU|Renderer|Plugin|Alerts)].app
           for SUFFIX in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
             NAME="whatRust Helper${SUFFIX}"
             ID_SUFFIX=$(echo "$SUFFIX" | tr ' ()' '-' | tr '[:upper:]' '[:lower:]' | sed 's/--*/-/g; s/^-\|-$//g')
             BUNDLE_ID="com.karem.whatrust.helper${ID_SUFFIX:+.$ID_SUFFIX}"
             HELPER="$FW/${NAME}.app"
-            mkdir -p "$HELPER/Contents/MacOS" "$HELPER/Contents/Resources"
-            cp "src-tauri/target/${{ matrix.target }}/release/whatrust_helper" "$HELPER/Contents/MacOS/${NAME}" || cp "$MACOS/whatRust" "$HELPER/Contents/MacOS/${NAME}"
+            mkdir -p "$HELPER/Contents/MacOS"
+            cp "$BIN/whatrust_helper" "$HELPER/Contents/MacOS/${NAME}"
             cat > "$HELPER/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
             <key>CFBundleName</key><string>${NAME}</string>
+            <key>CFBundleDisplayName</key><string>${NAME}</string>
             <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
             <key>CFBundleExecutable</key><string>${NAME}</string>
             <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleShortVersionString</key><string>0.7.0</string>
+            <key>CFBundleVersion</key><string>0.7.0</string>
+            <key>LSMinimumSystemVersion</key><string>13.0</string>
             <key>LSUIElement</key><true/>
+            <key>LSEnvironment</key><dict><key>MallocNanoZone</key><string>0</string></dict>
           </dict></plist>
           PLIST
           done
+
+          # Ad-hoc sign so macOS accepts the nested helper/framework code.
+          codesign --force --deep --sign - "$APP"
+
           mkdir -p dist
           hdiutil create -volname "whatRust" -srcfolder "$APP" -ov -format UDZO "dist/${{ matrix.artifact }}.dmg"
 
