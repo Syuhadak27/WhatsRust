@@ -1,9 +1,6 @@
 # whatRust — Klien WhatsApp Web Desktop (Rust + CEF)
 
-[![Lisensi: MIT](https://img.shields.io/github.com/Syuhadak27/WhatsRust?label=lisensi&style=for-the-badge&color=blue)](LICENSE)
 [![Platform: macOS Intel Ventura](https://img.shields.io/badge/platform-macOS%20Intel%20Ventura-informational)](https://github.com/Syuhadak27/WhatsRust/releases/latest)
-[![GitHub stars](https://img.shields.io/github.com/Syuhadak27/WhatsRust/stars?style=social)](https://github.com/Syuhadak27/WhatsRust/stargazers)
-[![GitHub forks](https://img.shields.io/github.com/Syuhadak27/WhatsRust/forks?style=social)](https://github.com/Syuhadak27/WhatsRust/network)
 
 ---
 
