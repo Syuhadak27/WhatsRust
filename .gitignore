@@ -21,3 +21,6 @@ dist/
 # UI validation artifacts
 /.playwright-cli/
 /output/
+
+# local backup archives
+*.zip
