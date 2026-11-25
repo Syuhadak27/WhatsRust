@@ -31,7 +31,7 @@ pub fn handle_message(msg: &BridgeMessage) -> BridgeReply {
             BridgeReply { ok: true, error: None }
         }
         MSG_SET_UNREAD => {
-            crate::app::state().lock().unread = msg.count;
+            if let Ok(mut st) = crate::app::state().lock() { st.unread = msg.count; }
             BridgeReply { ok: true, error: None }
         }
         MSG_OPEN_EXTERNAL => {

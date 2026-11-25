@@ -1,7 +1,6 @@
 use crate::{config::{Settings, WindowState}, tray::{Tray, TrayCommand}};
-use cef::{args::Args, BrowserSettings, CefApp, ImplBrowser, ImplBrowserHost, ImplView, ImplWindow, Rect, WindowInfo};
-use parking_lot::Mutex;
-use std::sync::{Arc, OnceLock};
+use cef::*;
+use std::sync::{Arc, Mutex};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -15,15 +14,17 @@ pub struct SharedState {
     pub reload: bool,
 }
 
-static STATE: OnceLock<Arc<Mutex<SharedState>>> = OnceLock::new();
+static STATE: std::sync::OnceLock<Arc<Mutex<SharedState>>> = std::sync::OnceLock::new();
 pub fn state() -> Arc<Mutex<SharedState>> {
-    STATE.get_or_init(|| Arc::new(Mutex::new(SharedState { visible: true, ..Default::default() }))).clone()
+    STATE
+        .get_or_init(|| Arc::new(Mutex::new(SharedState { visible: true, ..Default::default() })))
+        .clone()
 }
 
 pub struct WhatRustApp {
     window: Option<Arc<Window>>,
     tray: Option<Tray>,
-    browser: Option<cef::Browser>,
+    browser: Option<Browser>,
     window_state: WindowState,
     settings: Settings,
 }
@@ -40,49 +41,36 @@ impl WhatRustApp {
         }
     }
 
-    pub fn run(&mut self, main_args: cef::MainArgs, cef_settings: cef::Settings, browser_app: CefApp<crate::browser::BrowserApp>) {
-        let mut cef_app = browser_app;
-        cef::initialize(Some(main_args.as_ref()), Some(&cef_settings), Some(&mut cef_app), std::ptr::null_mut());
-
+    pub fn run(&mut self) {
         let event_loop = EventLoop::new().expect("event loop");
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.run_app(self).expect("run app");
-
-        if let Some(b) = self.browser.as_ref() {
-            let host = b.host().unwrap();
-            host.close_browser(true as _);
-        }
-        cef::shutdown();
     }
 
     fn create_browser(&mut self, event_loop: &ActiveEventLoop) {
         let mut attrs = Window::default_attributes()
             .with_title("whatRust")
-            .with_inner_size(winit::dpi::LogicalSize::new(self.window_state.width.max(800), self.window_state.height.max(600)));
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                self.window_state.width.max(800),
+                self.window_state.height.max(600),
+            ));
         if let (Some(x), Some(y)) = (self.window_state.x, self.window_state.y) {
             attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("window"));
         if self.settings.start_minimized {
             window.set_visible(false);
-            state().lock().visible = false;
-        } else {
-            state().lock().visible = true;
-        }
+            if let Ok(mut s) = state().lock() { s.visible = false; }
+        } else if let Ok(mut s) = state().lock() { s.visible = true; }
         if self.window_state.maximized { window.set_maximized(true); }
-        #[cfg(target_os = "macos")]
-        if self.window_state.fullscreen { window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None))); }
 
         let window_info = window_info_for(&window);
-        let browser_settings = BrowserSettings {
-            background_color: 0xFFFFFFFF,
-            ..Default::default()
-        };
-        let client = CefApp::new(crate::browser::Client::new(state()));
-        let url = cef::CefString::from("https://web.whatsapp.com");
-        let browser = cef::browser_host_create_browser_sync(
+        let browser_settings = BrowserSettings::default();
+        let mut client = crate::browser::ClientImpl::new(state());
+        let url = CefString::from("https://web.whatsapp.com");
+        let browser = browser_host_create_browser_sync(
             Some(&window_info),
-            Some(&mut client.clone()),
+            Some(&mut client),
             Some(&url),
             Some(&browser_settings),
             None,
@@ -93,8 +81,8 @@ impl WhatRustApp {
     }
 
     fn toggle_visible(&mut self) {
-        let visible = { let mut s = state().lock(); s.visible = !s.visible; s.visible };
-        if let Some(w) = &self.window { w.set_visible(visible); if visible { let _ = w.request_user_attention(Some(winit::window::UserAttentionType::Critical)); } }
+        let visible = if let Ok(mut s) = state().lock() { s.visible = !s.visible; s.visible } else { true };
+        if let Some(w) = &self.window { w.set_visible(visible); }
     }
 
     fn persist_window_state(&mut self) {
@@ -105,7 +93,6 @@ impl WhatRustApp {
         self.window_state.height = size.height;
         if let Some(p) = pos { self.window_state.x = Some(p.x); self.window_state.y = Some(p.y); }
         self.window_state.maximized = w.is_maximized();
-        self.window_state.fullscreen = w.fullscreen().is_some();
         let _ = self.window_state.save();
     }
 }
@@ -127,9 +114,9 @@ impl ApplicationHandler for WhatRustApp {
                 self.persist_window_state();
                 if self.settings.close_to_tray {
                     if let Some(w) = &self.window { w.set_visible(false); }
-                    state().lock().visible = false;
+                    if let Ok(mut s) = state().lock() { s.visible = false; }
                 } else {
-                    state().lock().should_quit = true;
+                    if let Ok(mut s) = state().lock() { s.should_quit = true; }
                     event_loop.exit();
                 }
             }
@@ -141,30 +128,27 @@ impl ApplicationHandler for WhatRustApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        cef::do_message_loop_work();
+        do_message_loop_work();
 
         if let Some(tray) = &self.tray {
             match tray.poll_event() {
                 Some(TrayCommand::Show) => self.toggle_visible(),
-                Some(TrayCommand::Reload) => {
-                    if let Some(b) = &self.browser { b.reload(); }
-                }
+                Some(TrayCommand::Reload) => { if let Some(b) = &self.browser { b.reload(); } }
                 Some(TrayCommand::Quit) => {
                     self.persist_window_state();
-                    state().lock().should_quit = true;
+                    if let Ok(mut s) = state().lock() { s.should_quit = true; }
                     event_loop.exit();
                 }
                 None => {}
             }
         }
 
-        let st = state();
-        let (unread, reload, quit) = {
-            let mut s = st.lock();
+        let (unread, reload, quit) = if let Ok(mut s) = state().lock() {
             let r = (s.unread, s.reload, s.should_quit);
             s.reload = false;
             r
-        };
+        } else { (0, false, false) };
+
         if quit { self.persist_window_state(); event_loop.exit(); }
         if reload { if let Some(b) = &self.browser { b.reload(); } }
         if let Some(tray) = &self.tray { tray.set_unread(unread > 0); }
