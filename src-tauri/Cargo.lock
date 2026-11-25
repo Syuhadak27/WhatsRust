@@ -3488,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "whatrust"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "cef",
  "cef-dll-sys",

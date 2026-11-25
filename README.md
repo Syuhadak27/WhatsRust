@@ -69,7 +69,7 @@ Proyek ini telah dideploy ulang dari Tauri ke **Rust murni + CEF**. Struktur uta
 ```toml
 [package]
 name = "whatrust"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 
 [dependencies]
