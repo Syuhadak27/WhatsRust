@@ -157,6 +157,17 @@ wrap_life_span_handler! {
     }
 
     impl LifeSpanHandler {
+        fn on_after_created(&self, browser: Option<&mut Browser>) {
+            // The browser is created asynchronously on macOS, so this is the
+            // only place we can get a handle to it. Ignore popups/devtools and
+            // keep the main browser in shared state for reload/quit handling.
+            let Some(browser) = browser else { return };
+            if browser.is_popup() != 0 { return; }
+            if let Ok(mut s) = self.state.lock() {
+                s.browser = Some((*browser).clone());
+            }
+        }
+
         fn on_before_popup(
             &self,
             _browser: Option<&mut Browser>,

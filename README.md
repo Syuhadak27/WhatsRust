@@ -39,7 +39,7 @@ Proyek ini telah dideploy ulang dari Tauri ke **Rust murni + CEF**. Struktur uta
 |---|---|
 | `src-tauri/src/main.rs` | Entry point CEF, Settings, inisialisasi `BrowserApp` |
 | `src-tauri/src/browser.rs` | CEF handlers: anti-throttling, media permission, title/unread, JS bridge, console |
-| `src-tauri/src/app.rs` | Event loop winit, window state, hide-to-tray, perintah tray |
+| `src-tauri/src/app.rs` | Event loop winit (macOS: `pump_app_events` agar CEF tidak re-entrant), window state, hide-to-tray, perintah tray |
 | `src-tauri/src/bridge.rs` | Handler pesan dari JavaScript (`notify`, `set_unread`, `open_external`) |
 | `src-tauri/src/helper.rs` | Sub-proses CEF macOS — helper binary dengan `Info.plist` dan entitlements |
 | `src-tauri/src/main.rs` | Loop event, CEF settings, cache paths, startup |

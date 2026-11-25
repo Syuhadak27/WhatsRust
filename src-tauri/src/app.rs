@@ -12,6 +12,10 @@ pub struct SharedState {
     pub visible: bool,
     pub should_quit: bool,
     pub reload: bool,
+    /// The main browser, handed to us by `LifeSpanHandler::on_after_created`.
+    /// Kept here because CEF creates it asynchronously on macOS (see
+    /// `create_browser`), so there is no return value to hold onto.
+    pub browser: Option<Browser>,
 }
 
 static STATE: std::sync::OnceLock<Arc<Mutex<SharedState>>> = std::sync::OnceLock::new();
@@ -24,7 +28,9 @@ pub fn state() -> Arc<Mutex<SharedState>> {
 pub struct WhatRustApp {
     window: Option<Arc<Window>>,
     tray: Option<Tray>,
-    browser: Option<Browser>,
+    /// Last badge state pushed to the tray, so we don't rebuild the icon on
+    /// every event-loop pump.
+    tray_unread: bool,
     window_state: WindowState,
     settings: Settings,
 }
@@ -35,15 +41,47 @@ impl WhatRustApp {
         Self {
             window: None,
             tray: None,
-            browser: None,
+            tray_unread: false,
             window_state: WindowState::load(),
             settings: Settings::load(),
         }
     }
 
     pub fn run(&mut self) {
-        let event_loop = EventLoop::new().expect("event loop");
+        let mut event_loop = EventLoop::new().expect("event loop");
+        // With `pump_app_events` the explicit timeout drives the loop; using
+        // `Poll` here would make winit wake immediately and spin the CPU.
+        #[cfg(target_os = "macos")]
+        event_loop.set_control_flow(ControlFlow::Wait);
+        #[cfg(not(target_os = "macos"))]
         event_loop.set_control_flow(ControlFlow::Poll);
+
+        #[cfg(target_os = "macos")]
+        {
+            // macOS: winit defers events that arrive while its `ApplicationHandler`
+            // is borrowed via `CFRunLoopPerformBlock`. CEF's `DoMessageLoopWork`
+            // enters a nested `NSRunLoop`, which executes those deferred blocks
+            // *re-entrantly* and makes winit panic at
+            // `event_handler.rs:135` ("tried to handle event while another event
+            // is currently being handled") -> abort.
+            //
+            // Driving winit with `pump_app_events` unsets the handler as soon as
+            // each pump returns. We then let CEF do its work while no winit
+            // callback is active, so any event CEF's nested loop queues is
+            // delivered on the next pump instead of re-entering the handler.
+            use std::time::Duration;
+            use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
+
+            loop {
+                let status = event_loop.pump_app_events(Some(Duration::from_millis(8)), self);
+                do_message_loop_work();
+                if matches!(status, PumpStatus::Exit(_)) {
+                    break;
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
         event_loop.run_app(self).expect("run app");
     }
 
@@ -68,6 +106,23 @@ impl WhatRustApp {
         let browser_settings = BrowserSettings::default();
         let mut client = crate::browser::ClientImpl::new(state());
         let url = CefString::from("https://web.whatsapp.com");
+
+        // On macOS the synchronous creation API spins a nested `NSRunLoop`
+        // while waiting for `OnAfterCreated`. `resumed()` is dispatched from
+        // inside winit's handler, so that nested loop can run one of winit's
+        // deferred events re-entrantly and abort the process. The asynchronous
+        // variant does not block, and `LifeSpanHandler::on_after_created`
+        // stores the resulting browser in `SharedState` for us.
+        #[cfg(target_os = "macos")]
+        browser_host_create_browser(
+            Some(&window_info),
+            Some(&mut client),
+            Some(&url),
+            Some(&browser_settings),
+            None,
+            None,
+        );
+        #[cfg(not(target_os = "macos"))]
         let browser = browser_host_create_browser_sync(
             Some(&window_info),
             Some(&mut client),
@@ -76,13 +131,23 @@ impl WhatRustApp {
             None,
             None,
         );
-        self.browser = browser;
+        #[cfg(not(target_os = "macos"))]
+        if let Ok(mut s) = state().lock() { s.browser = browser; }
+
         self.window = Some(window);
     }
 
     fn toggle_visible(&mut self) {
         let visible = if let Ok(mut s) = state().lock() { s.visible = !s.visible; s.visible } else { true };
         if let Some(w) = &self.window { w.set_visible(visible); }
+    }
+
+    /// Clone the browser out of shared state so CEF calls never happen while
+    /// the state mutex is held (CEF handlers may synchronously call back into
+    /// the same state).
+    fn reload_browser() {
+        let browser = state().lock().ok().and_then(|s| s.browser.clone());
+        if let Some(b) = browser { b.reload(); }
     }
 
     fn persist_window_state(&mut self) {
@@ -128,12 +193,16 @@ impl ApplicationHandler for WhatRustApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // NOTE: `do_message_loop_work()` deliberately lives outside this
+        // callback on macOS (in `run()`), because CEF pumps a nested
+        // `NSRunLoop` that would re-enter winit's borrowed handler.
+        #[cfg(not(target_os = "macos"))]
         do_message_loop_work();
 
         if let Some(tray) = &self.tray {
             match tray.poll_event() {
                 Some(TrayCommand::Show) => self.toggle_visible(),
-                Some(TrayCommand::Reload) => { if let Some(b) = &self.browser { b.reload(); } }
+                Some(TrayCommand::Reload) => Self::reload_browser(),
                 Some(TrayCommand::Quit) => {
                     self.persist_window_state();
                     if let Ok(mut s) = state().lock() { s.should_quit = true; }
@@ -150,8 +219,12 @@ impl ApplicationHandler for WhatRustApp {
         } else { (0, false, false) };
 
         if quit { self.persist_window_state(); event_loop.exit(); }
-        if reload { if let Some(b) = &self.browser { b.reload(); } }
-        if let Some(tray) = &self.tray { tray.set_unread(unread > 0); }
+        if reload { Self::reload_browser(); }
+        let unread = unread > 0;
+        if unread != self.tray_unread {
+            self.tray_unread = unread;
+            if let Some(tray) = &self.tray { tray.set_unread(unread); }
+        }
     }
 }
 
