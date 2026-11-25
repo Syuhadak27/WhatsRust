@@ -10,7 +10,8 @@ permissions:
   contents: write
 
 env:
-  CEF_VERSION: "131.3.5+gfe0854a+chromium-131.0.6778.140"
+  CEF_VERSION: "151.3.24+g2384915+chromium-151.0.7922.174"
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -127,6 +128,7 @@ jobs:
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.7.0</string>
             <key>CFBundleVersion</key><string>0.7.0</string>
+            <key>LSMinimumSystemVersion</key><string>13.0</string>
             <key>NSHighResolutionCapable</key><true/>
             <key>NSMicrophoneUsageDescription</key><string>whatRust needs microphone access for WhatsApp voice calls and voice notes.</string>
             <key>NSCameraUsageDescription</key><string>whatRust needs camera access for WhatsApp video calls and camera features.</string>

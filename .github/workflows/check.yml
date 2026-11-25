@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 env:
-  CEF_VERSION: "131.3.5+gfe0854a+chromium-131.0.6778.140"
+  CEF_VERSION: "151.3.24+g2384915+chromium-151.0.7922.174"
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
 
 jobs:
   check:
