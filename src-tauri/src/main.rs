@@ -43,7 +43,7 @@ fn main() {
     let res = exe_dir.to_string_lossy().to_string();
     let locales = exe_dir.join("locales").to_string_lossy().to_string();
 
-    let mut settings = Settings {
+    let settings = Settings {
         no_sandbox: !cfg!(feature = "sandbox") as _,
         windowless_rendering_enabled: 0,
         external_message_pump: 0,

@@ -175,7 +175,11 @@ impl WhatRustApp {
     /// never deadlock against us.
     fn apply_resize(&mut self) {
         let (browser, pending_resize, scale_changed) = {
-            let Ok(s) = state().lock() else { return };
+            // Bind the Arc first: `state().lock()` alone would create a
+            // temporary Arc that is dropped while the MutexGuard still
+            // borrows from it (E0716).
+            let shared = state();
+            let Ok(s) = shared.lock() else { return };
             if !s.pending_resize && !s.scale_changed { return; }
             // Clone the handle out, then release the lock *before* calling
             // CEF: CEF handlers also lock this state and would deadlock.

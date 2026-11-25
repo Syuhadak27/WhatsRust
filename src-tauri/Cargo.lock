@@ -3502,12 +3502,10 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "open",
- "parking_lot",
  "percent-encoding",
  "serde",
  "serde_json",
  "tray-icon",
- "url",
  "windows",
  "winit",
 ]

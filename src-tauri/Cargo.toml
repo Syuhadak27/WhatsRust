@@ -20,6 +20,11 @@ path = "src/main.rs"
 name = "whatrust_helper"
 path = "src/helper.rs"
 
+[features]
+# CEF itself is built with its sandbox feature; this crate-level feature only
+# controls the `no_sandbox` setting in main.rs.
+sandbox = []
+
 [dependencies]
 cef = { version = "151.8.1", features = ["sandbox"] }
 cef-dll-sys = "151.8.1"
@@ -30,10 +35,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 crossbeam-channel = "0.5"
-parking_lot = "0.12"
 dirs = "6"
 open = "5"
-url = "2"
 percent-encoding = "2"
 notify-rust = "4"
 
