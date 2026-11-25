@@ -84,10 +84,6 @@ wrap_client! {
             Some(LifeSpanHandlerImpl::new(self.state.clone()))
         }
 
-        fn request_handler(&self) -> Option<RequestHandler> {
-            Some(RequestHandlerImpl::new(self.state.clone()))
-        }
-
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(LoadHandlerImpl::new(self.state.clone()))
         }
@@ -184,18 +180,6 @@ wrap_life_span_handler! {
                 }
             }
             1
-        }
-    }
-}
-
-wrap_request_handler! {
-    struct RequestHandlerImpl {
-        state: Arc<Mutex<SharedState>>,
-    }
-
-    impl RequestHandler {
-        fn permission_handler(&self) -> Option<PermissionHandler> {
-            Some(PermissionHandlerImpl::new(self.state.clone()))
         }
     }
 }
