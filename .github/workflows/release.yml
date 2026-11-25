@@ -39,47 +39,25 @@ jobs:
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
           echo "prerelease=${PRE}" >> "$GITHUB_OUTPUT"
 
-  build:
+  build-macos-intel:
     needs: prepare
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            cef_platform: macosarm64
-            artifact: whatRust-macos-arm64
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-            cef_platform: macosx64
-            artifact: whatRust-macos-x64-ventura
-          - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            cef_platform: linux64
-            artifact: whatRust-linux-x64
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            cef_platform: windows64
-            artifact: whatRust-windows-x64
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15-intel
+    env:
+      TARGET: x86_64-apple-darwin
+      CEF_PLATFORM: macosx64
+      ARTIFACT: whatRust-macos-x64-ventura
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ env.TARGET }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
         with:
           workspaces: src-tauri -> target
-
-      - name: Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential curl wget file libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev libasound2-dev libnss3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
       - name: Download CEF
         shell: bash
@@ -107,10 +85,10 @@ jobs:
               g.write(f'CEF_PATH={dst}\n')
           print('CEF_PATH',dst)
           PYDL
-          python3 "$RUNNER_TEMP/dl_cef.py" || python "$RUNNER_TEMP/dl_cef.py"
+          python3 "$RUNNER_TEMP/dl_cef.py"
         env:
           CEF_VERSION: ${{ env.CEF_VERSION }}
-          CEF_PLATFORM: ${{ matrix.cef_platform }}
+          CEF_PLATFORM: ${{ env.CEF_PLATFORM }}
 
       - name: Build
         shell: bash
@@ -119,17 +97,16 @@ jobs:
           CEF_PATH: ${{ env.CEF_PATH }}
         run: |
           set -o pipefail
-          cargo build --release --target ${{ matrix.target }} 2>&1 | tee "build.log"
+          cargo build --release --target "$TARGET" 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             echo "::group::Compiler errors"
-            grep -E '^(error|warning: unused)' "build.log" | head -60 | while IFS= read -r line; do echo "::error::${line}"; done || true
+            grep -E '^(error|warning: unused)' build.log | head -60 | while IFS= read -r line; do echo "::error::${line}"; done || true
             echo "::endgroup::"
             exit "$status"
           fi
 
-      - name: Package macOS
-        if: runner.os == 'macOS'
+      - name: Package DMG
         shell: bash
         run: |
           set -euo pipefail
@@ -137,14 +114,11 @@ jobs:
           MACOS="$APP/Contents/MacOS"
           FW="$APP/Contents/Frameworks"
           RES="$APP/Contents/Resources"
-          BIN="src-tauri/target/${{ matrix.target }}/release"
+          BIN="src-tauri/target/$TARGET/release"
           rm -rf "$APP"
           mkdir -p "$MACOS" "$FW" "$RES"
           cp "$BIN/whatrust" "$MACOS/whatRust"
 
-          # CEF on macOS ships as a framework bundle. Its own Resources
-          # (pak files, locales, icudtl.dat) live inside the framework, so
-          # only the app icon goes into Contents/Resources here.
           test -d "$CEF_PATH/Release/Chromium Embedded Framework.framework"
           cp -R "$CEF_PATH/Release/Chromium Embedded Framework.framework" "$FW/"
           cp src-tauri/icons/icon.icns "$RES/icon.icns"
@@ -172,8 +146,6 @@ jobs:
           </dict></plist>
           PLIST
 
-          # CEF sub-process helpers. Names must match the CEF defaults:
-          # <AppName> Helper[ (GPU|Renderer|Plugin|Alerts)].app
           for SUFFIX in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
             NAME="whatRust Helper${SUFFIX}"
             ID_SUFFIX=$(echo "$SUFFIX" | tr ' ()' '-' | tr '[:upper:]' '[:lower:]' | sed 's/--*/-/g; s/^-\|-$//g')
@@ -200,60 +172,22 @@ jobs:
           PLIST
           done
 
-          # Ad-hoc sign so macOS accepts the nested helper/framework code.
           codesign --force --deep --sign - "$APP"
 
           mkdir -p dist
-          hdiutil create -volname "whatRust" -srcfolder "$APP" -ov -format UDZO "dist/${{ matrix.artifact }}.dmg"
+          hdiutil create -volname "whatRust" -srcfolder "$APP" -ov -format UDZO "dist/${ARTIFACT}.dmg"
 
-      - name: Package Linux
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUT="dist/${{ matrix.artifact }}"
-          mkdir -p "$OUT"
-          cp "src-tauri/target/${{ matrix.target }}/release/whatrust" "$OUT/whatRust"
-          cp -R "$CEF_PATH/Release/"* "$OUT/" || true
-          cp -R "$CEF_PATH/Resources/"* "$OUT/" || true
-          cp -R src-tauri/resources "$OUT/resources" || true
-          cp -R src-tauri/icons "$OUT/icons" || true
-          cat > "$OUT/whatRust.sh" <<'SH'
-          #!/usr/bin/env bash
-          DIR="$(cd "$(dirname "$0")" && pwd)"
-          export LD_LIBRARY_PATH="$DIR:${LD_LIBRARY_PATH:-}"
-          exec "$DIR/whatRust" "$@"
-          SH
-          chmod +x "$OUT/whatRust" "$OUT/whatRust.sh"
-          tar -C dist -czf "dist/${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
-
-      - name: Package Windows
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUT="dist/${{ matrix.artifact }}"
-          mkdir -p "$OUT"
-          cp "src-tauri/target/${{ matrix.target }}/release/whatrust.exe" "$OUT/whatRust.exe"
-          cp -R "$CEF_PATH/Release/"* "$OUT/" || true
-          cp -R "$CEF_PATH/Resources/"* "$OUT/" || true
-          cd dist && powershell -Command "Compress-Archive -Path '${{ matrix.artifact }}/*' -DestinationPath '${{ matrix.artifact }}.zip' -Force"
-
-      - name: Upload artifacts
+      - name: Upload DMG
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ matrix.artifact }}
-          path: |
-            dist/*.dmg
-            dist/*.tar.gz
-            dist/*.zip
+          name: ${{ env.ARTIFACT }}
+          path: dist/*.dmg
           if-no-files-found: error
 
   release:
-    needs: [prepare, build]
+    needs: [prepare, build-macos-intel]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: release-assets
