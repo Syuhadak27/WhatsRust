@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/dl_cef.py" <<'PYDL'
-          import os, tarfile, urllib.request, shutil, pathlib
+          import os, tarfile, urllib.request, shutil, pathlib, json
           ver=os.environ['CEF_VERSION']
           plat=os.environ['CEF_PLATFORM']
           rt=os.environ['RUNNER_TEMP']
@@ -81,6 +81,8 @@ jobs:
                   m.name='/'.join(m.name.split('/')[1:])
                   if not m.name: continue
                   t.extract(m,dst)
+          with open(os.path.join(dst,'archive.json'),'w') as f:
+              json.dump({'type':'minimal','name':f'cef_binary_{ver}_{plat}_minimal','sha1':'0'},f)
           with open(os.environ['GITHUB_ENV'],'a') as g:
               g.write(f'CEF_PATH={dst}\n')
           print('CEF_PATH',dst)
