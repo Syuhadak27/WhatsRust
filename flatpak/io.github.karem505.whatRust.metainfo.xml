@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Karem -->
+<component type="desktop-application">
+  <id>io.github.karem505.whatRust</id>
+  <name>whatRust</name>
+  <summary>Lightweight unofficial WhatsApp Web client</summary>
+
+  <developer id="io.github.karem505">
+    <name>Karem</name>
+  </developer>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <url type="homepage">https://github.com/karem505/whatRust</url>
+  <url type="vcs-browser">https://github.com/karem505/whatRust</url>
+  <url type="bugtracker">https://github.com/karem505/whatRust/issues</url>
+  <url type="faq">https://github.com/karem505/whatRust#faq</url>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#25D366</color>
+    <color type="primary" scheme_preference="dark">#128C7E</color>
+  </branding>
+
+  <description>
+    <p>
+      whatRust is an unofficial, independent desktop client that loads the official
+      WhatsApp Web interface in the system WebKitGTK webview. It is not affiliated
+      with, endorsed by, or sponsored by WhatsApp or Meta.
+    </p>
+    <p>It adds desktop features beyond a browser tab:</p>
+    <ul>
+      <li>Multiple isolated WhatsApp accounts in separate windows</li>
+      <li>Native notifications, system tray integration, and close to tray</li>
+      <li>Drag-and-drop attachment routing with bounded memory use</li>
+      <li>Optional password lock and automatic idle locking</li>
+      <li>Persistent sessions, display scaling, and configurable shortcuts</li>
+    </ul>
+    <p>
+      Voice messages work on Linux. Voice and video calls normally do not because
+      mainstream Linux WebKitGTK runtimes are built without compatible WebRTC support.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.karem505.whatRust.desktop</launchable>
+
+  <requires>
+    <internet>always</internet>
+    <display_length compare="ge">600</display_length>
+  </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://github.com/karem505/whatRust/releases/download/v0.6.2/settings.png</image>
+      <caption>Manage accounts, desktop preferences, shortcuts, and app lock</caption>
+    </screenshot>
+  </screenshots>
+
+  <releases>
+    <release type="stable" version="0.7.0" date="2026-11-25">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.7.0</url>
+      <description>
+        <p>Do not disturb hours, a switch for WhatsApp's notification sounds, optional sleep for accounts you have not opened, a settings backup, Ctrl+1 to 9 to switch accounts, and pasting images and copied files on Linux. With several accounts the one you open first loads first. Idle sounds no longer pile up in the volume mixer, downloads no longer get a doubled extension, and the Windows taskbar shows the app icon.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.16" date="2026-11-13">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.16</url>
+      <description>
+        <p>Builds for ARM and Intel on every system. The in-app update installs Flatpak updates itself. Old graphics cards no longer leave a blank window after login, the AppImage loads on openSUSE and Fedora, title-bar buttons on KDE work after restoring from the tray, and WhatsApp's prompts to get its desktop app are hidden.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.15" date="2026-11-12">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.15</url>
+      <description>
+        <p>Accounts can have a profile photo, Settings has an About whatRust page with the contributors, and the privacy blur covers more of WhatsApp, including notification contents. On Windows the privacy blur panel now opens with Ctrl+Shift+P or from the whatRust menu.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.14" date="2026-11-10">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.14</url>
+      <description>
+        <p>Attaching a video works again on Linux: the preview appears, the thumbnail is correct, and memory use stays low instead of growing until the desktop freezes.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.13" date="2026-11-09">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.13</url>
+      <description>
+        <p>Smooth scrolling on laptops with Intel or AMD graphics plus an NVIDIA card: the fast WebKit renderer is now turned off only when NVIDIA drives the display.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.12" date="2026-11-09">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.12</url>
+      <description>
+        <p>Fixes arrow keys typing symbols on macOS, restores profile pictures on Windows notifications and fixes the download popup. On tiling window managers such as Hyprland the title bar is hidden.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.11" date="2026-11-07">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.11</url>
+      <description>
+        <p>Adds in-app updates, and drag-and-drop works again on Linux. Also adds a privacy blur, a proxy setting, zoom shortcuts, a custom download folder and app icon, an optional single window for all accounts, and the unread count on the Linux dock.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.10" date="2026-11-03">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.10</url>
+      <description>
+        <p>Shows the unread count on the Dock icon on macOS and on the taskbar button on Windows, makes scrolling and typing smooth again in the Flatpak, and fixes the macOS installer when the disk image is already open.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.9" date="2026-10-24">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.9</url>
+      <description>
+        <p>Adds an interface language setting (English or Portuguese) and a menu-bar-only mode on macOS, hardens the app lock and saves settings and accounts safely, and fixes notifications and freezes on Windows.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.8" date="2026-10-16">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.8</url>
+      <description>
+        <p>Adds an option to hide the menu bar icon on macOS, fixes a blank Display size list and shows the app logo on notifications on Windows.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.7" date="2026-10-10">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.7</url>
+      <description>
+        <p>Shows the sender's profile picture on message notifications on Windows and Linux, and fixes possible freezes on Windows when adding or opening an account, opening Settings, or locking the app.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.6" date="2026-10-09">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.6</url>
+      <description>
+        <p>Fixes the AppImage failing to load WhatsApp behind an HTTP(S) proxy, and a startup error in the page on Linux and macOS.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.5" date="2026-10-09">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.5</url>
+      <description>
+        <p>Makes message notifications appear on Windows, with a fallback alert on every platform when a new chat goes unread without one.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.4" date="2026-10-09">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.4</url>
+      <description>
+        <p>Fixes notifications and the unread badge, opens links from chats, handles whatsapp:// links, and adds download feedback with a refreshed settings layout.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.3" date="2026-08-21">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.3</url>
+      <description>
+        <p>Adds native Flatpak packaging and sandbox-aware single-instance and autostart integration.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.2" date="2026-08-21">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.2</url>
+      <description>
+        <p>Improves drag-and-drop ordering, responsiveness, decoding, and memory bounds.</p>
+      </description>
+    </release>
+    <release type="stable" version="0.6.1" date="2026-08-21">
+      <url type="details">https://github.com/karem505/whatRust/releases/tag/v0.6.1</url>
+      <description>
+        <p>Adds responsive large-file drag and drop across desktop platforms.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>

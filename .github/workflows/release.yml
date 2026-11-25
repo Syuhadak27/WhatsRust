@@ -1,0 +1,222 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CEF_VERSION: "131.3.5+gfe0854a+chromium-131.0.6778.140"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      name: ${{ steps.meta.outputs.name }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            NAME="whatRust ${TAG}"
+            PRE=false
+          else
+            TAG="latest"
+            NAME="whatRust Latest (main)"
+            PRE=true
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRE}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            cef_platform: macosarm64
+            artifact: whatRust-macos-arm64
+          - runner: macos-26-intel
+            target: x86_64-apple-darwin
+            cef_platform: macosx64
+            artifact: whatRust-macos-x64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            cef_platform: linux64
+            artifact: whatRust-linux-x64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            cef_platform: windows64
+            artifact: whatRust-windows-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev libasound2-dev libnss3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Download CEF
+        shell: bash
+        run: |
+          set -euo pipefail
+          CEF_DIR="$RUNNER_TEMP/cef"
+          mkdir -p "$CEF_DIR"
+          URL="https://cef-builds.spotifycdn.com/cef_binary_${CEF_VERSION}_${{ matrix.cef_platform }}_minimal.tar.bz2"
+          echo "Downloading $URL"
+          curl -fL "$URL" -o "$RUNNER_TEMP/cef.tar.bz2"
+          tar -xjf "$RUNNER_TEMP/cef.tar.bz2" -C "$CEF_DIR" --strip-components=1
+          echo "CEF_PATH=$CEF_DIR" >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        working-directory: src-tauri
+        env:
+          CEF_PATH: ${{ env.CEF_PATH }}
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="dist/whatRust.app"
+          MACOS="$APP/Contents/MacOS"
+          FW="$APP/Contents/Frameworks"
+          RES="$APP/Contents/Resources"
+          mkdir -p "$MACOS" "$FW" "$RES"
+          cp "src-tauri/target/${{ matrix.target }}/release/whatrust" "$MACOS/whatRust"
+          cp "src-tauri/target/${{ matrix.target }}/release/whatrust_helper" "$MACOS/whatRust Helper" || true
+          cp -R "$CEF_PATH/Release/"* "$FW/" || true
+          cp -R "$CEF_PATH/Resources/"* "$RES/" || true
+          cp src-tauri/icons/icon.icns "$RES/icon.icns" || true
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>whatRust</string>
+            <key>CFBundleDisplayName</key><string>whatRust</string>
+            <key>CFBundleIdentifier</key><string>com.karem.whatrust</string>
+            <key>CFBundleExecutable</key><string>whatRust</string>
+            <key>CFBundleIconFile</key><string>icon.icns</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.7.0</string>
+            <key>CFBundleVersion</key><string>0.7.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSMicrophoneUsageDescription</key><string>whatRust needs microphone access for WhatsApp voice calls and voice notes.</string>
+            <key>NSCameraUsageDescription</key><string>whatRust needs camera access for WhatsApp video calls and camera features.</string>
+          </dict></plist>
+          PLIST
+          # CEF helper bundles on macOS
+          for SUFFIX in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
+            NAME="whatRust Helper${SUFFIX}"
+            ID_SUFFIX=$(echo "$SUFFIX" | tr ' ()' '-' | tr '[:upper:]' '[:lower:]' | sed 's/--*/-/g; s/^-\|-$//g')
+            BUNDLE_ID="com.karem.whatrust.helper${ID_SUFFIX:+.$ID_SUFFIX}"
+            HELPER="$FW/${NAME}.app"
+            mkdir -p "$HELPER/Contents/MacOS" "$HELPER/Contents/Resources"
+            cp "src-tauri/target/${{ matrix.target }}/release/whatrust_helper" "$HELPER/Contents/MacOS/${NAME}" || cp "$MACOS/whatRust" "$HELPER/Contents/MacOS/${NAME}"
+            cat > "$HELPER/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>${NAME}</string>
+            <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
+            <key>CFBundleExecutable</key><string>${NAME}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSUIElement</key><true/>
+          </dict></plist>
+          PLIST
+          done
+          mkdir -p dist
+          hdiutil create -volname "whatRust" -srcfolder "$APP" -ov -format UDZO "dist/${{ matrix.artifact }}.dmg"
+
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="dist/${{ matrix.artifact }}"
+          mkdir -p "$OUT"
+          cp "src-tauri/target/${{ matrix.target }}/release/whatrust" "$OUT/whatRust"
+          cp -R "$CEF_PATH/Release/"* "$OUT/" || true
+          cp -R "$CEF_PATH/Resources/"* "$OUT/" || true
+          cp -R src-tauri/resources "$OUT/resources" || true
+          cp -R src-tauri/icons "$OUT/icons" || true
+          cat > "$OUT/whatRust.sh" <<'SH'
+          #!/usr/bin/env bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export LD_LIBRARY_PATH="$DIR:${LD_LIBRARY_PATH:-}"
+          exec "$DIR/whatRust" "$@"
+          SH
+          chmod +x "$OUT/whatRust" "$OUT/whatRust.sh"
+          tar -C dist -czf "dist/${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="dist/${{ matrix.artifact }}"
+          mkdir -p "$OUT"
+          cp "src-tauri/target/${{ matrix.target }}/release/whatrust.exe" "$OUT/whatRust.exe"
+          cp -R "$CEF_PATH/Release/"* "$OUT/" || true
+          cp -R "$CEF_PATH/Resources/"* "$OUT/" || true
+          cd dist && powershell -Command "Compress-Archive -Path '${{ matrix.artifact }}/*' -DestinationPath '${{ matrix.artifact }}.zip' -Force"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.name }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          make_latest: ${{ needs.prepare.outputs.tag != 'latest' }}
+          generate_release_notes: true
+          overwrite_files: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

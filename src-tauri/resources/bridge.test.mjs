@@ -1,0 +1,1081 @@
+// Zero-dependency behavioral tests for bridge.js's drag-drop injector
+// (the chunked __whatrustDropFeed protocol). Run: node src-tauri/resources/bridge.test.mjs
+// Exits nonzero on failure. Same standalone pattern as settings-ui/comboToAccelerator.test.mjs.
+//
+// The harness stubs the minimal DOM surface bridge.js touches, evals the real
+// script, then drives the feed exactly as window.rs does (begin/chunk/end/commit)
+// and asserts which fake <input type=file> received which File objects.
+
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const bridgeSrc = readFileSync(join(here, "bridge.js"), "utf8");
+
+let failures = 0;
+function assert(cond, msg) {
+  if (cond) {
+    console.log("  ok  " + msg);
+  } else {
+    failures++;
+    console.error("FAIL  " + msg);
+  }
+}
+const b64 = (s) => Buffer.from(s).toString("base64");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// --- minimal DOM stubs -------------------------------------------------------
+class FakeFile {
+  constructor(parts, name, opts) {
+    this.name = name;
+    this.type = (opts && opts.type) || "";
+    let size = 0;
+    for (const p of parts) size += p.length ?? 0;
+    this.size = size;
+    this.parts = parts;
+  }
+  bytes() {
+    const out = Buffer.concat(this.parts.map((p) => Buffer.from(p)));
+    return out;
+  }
+}
+class FakeDataTransfer {
+  constructor() {
+    this._files = [];
+    this.items = { add: (f) => this._files.push(f) };
+  }
+  get files() {
+    return this._files.slice();
+  }
+}
+class FakeMediaElement {
+  constructor() {
+    this.muted = false;
+    this.loop = false;
+    this.isConnected = false;
+    this.plays = 0;
+  }
+  play() {
+    this.plays++;
+    return Promise.resolve();
+  }
+}
+// WhatsApp's alert tones are `new Audio(...)`; chat media is created with
+// document.createElement and is not tracked by bridge.js.
+class FakeAudio extends FakeMediaElement {
+  constructor(src) {
+    super();
+    this.src = src || "";
+  }
+}
+class FakeInput {
+  constructor(accept) {
+    this.accept = accept;
+    this.isConnected = true;
+    this.files = [];
+    this.batches = []; // one entry per change event: [FakeFile, ...]
+  }
+  dispatchEvent(ev) {
+    if (ev.type === "change") {
+      this.batches.push(this.files.slice());
+      if (this.onchange) this.onchange();
+    }
+    return true;
+  }
+}
+
+class FakeElement {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.attrs = {};
+    this.listeners = {};
+    this.textContent = "";
+    this.className = "";
+    this.title = "";
+  }
+  get isConnected() {
+    let n = this;
+    while (n.parentNode) n = n.parentNode;
+    return n.isRoot === true;
+  }
+  get firstChild() {
+    return this.children[0] || null;
+  }
+  setAttribute(k, v) {
+    this.attrs[k] = String(v);
+  }
+  attachShadow() {
+    const root = new FakeElement("#shadow-root");
+    root.parentNode = this;
+    this.shadow = root;
+    return root;
+  }
+  appendChild(c) {
+    c.parentNode = this;
+    this.children.push(c);
+    return c;
+  }
+  removeChild(c) {
+    this.children = this.children.filter((x) => x !== c);
+    c.parentNode = null;
+    return c;
+  }
+  addEventListener(type, fn) {
+    (this.listeners[type] ||= []).push(fn);
+  }
+  click() {
+    for (const fn of this.listeners.click || []) fn({ isTrusted: true });
+  }
+  // Every element below this one, depth-first.
+  all() {
+    return this.children.flatMap((c) => [c, ...c.all()]);
+  }
+}
+
+// Static members are inherited, so null out fromBase64 explicitly: otherwise a
+// modern host's native decoder would win over the injected atob.
+class AtobOnlyUint8Array extends Uint8Array {}
+AtobOnlyUint8Array.fromBase64 = undefined;
+
+function makeHarness(options = {}) {
+  const mediaInput = new FakeInput("image/*,video/mp4,video/3gpp,video/quicktime");
+  const docInput = new FakeInput("*");
+  const logs = [];
+  const warns = [];
+  const invocations = [];
+  // Simulate WhatsApp's composer lifecycle: it opens right after an input change
+  // and "the user sends" ~80ms later. This exercises injectBatch's real waits
+  // (composer detected, then queue held until it closes) without long timeouts.
+  const state = { composerUntil: 0 };
+  const onChange = () => {
+    state.composerUntil = Date.now() + 80;
+  };
+  mediaInput.onchange = onChange;
+  docInput.onchange = onChange;
+  // `lazyInputs` mimics current WhatsApp Web: the file inputs do not exist until the
+  // attach menu's "Photos & videos" / "Document" entry is clicked, and the menu itself
+  // renders `menuDelayMs` after the attach (+) button is clicked.
+  const menu = { open: false, mounted: !options.lazyInputs, clicks: [] };
+  const clickable = (name, onClick) => ({
+    name,
+    closest: () => null,
+    click() {
+      menu.clicks.push(name);
+      onClick();
+    },
+  });
+  const plusButton = clickable("plus", () => {
+    setTimeout(() => (menu.open = true), options.menuDelayMs ?? 30);
+  });
+  const mediaItem = clickable("media item", () => (menu.mounted = true));
+  const docItem = clickable("document item", () => (menu.mounted = true));
+  // Something outside the menu the loose aria-label selector also matches.
+  const profilePhoto = clickable("profile photo", () => {});
+  const body = new FakeElement("body");
+  body.isRoot = true;
+  const head = new FakeElement("head");
+  const document = {
+    body,
+    ...(options.head === false ? {} : { head }),
+    getElementById(id) {
+      const all = [...body.all(), ...(head ? head.all() : [])];
+      return all.find((e) => e.id === id) || null;
+    },
+    createElement: (tag) => new FakeElement(tag),
+    title: "WhatsApp",
+    readyState: "complete",
+    addEventListener() {},
+    querySelectorAll(sel) {
+      if (sel === 'input[type="file"]') return menu.mounted ? [mediaInput, docInput] : [];
+      if (!options.lazyInputs) return [];
+      if (sel === '[aria-label*="hoto"]') return menu.open ? [profilePhoto, mediaItem] : [profilePhoto];
+      if (sel === '[data-icon="document"]' && menu.open) return [docItem];
+      return [];
+    },
+    querySelector(sel) {
+      if (sel === "title") return null;
+      if (options.lazyInputs) {
+        if (sel === '[data-icon="plus"]') return plusButton;
+        const first = this.querySelectorAll(sel)[0];
+        if (first) return first;
+      }
+      if (sel.includes("media-caption-input-container")) {
+        return Date.now() < state.composerUntil ? {} : null;
+      }
+      return null;
+    },
+  };
+  const listeners = {};
+  const window = {
+    location: { origin: "https://web.whatsapp.com" },
+    Notification: options.nativeNotification,
+    ServiceWorkerRegistration: options.serviceWorkerRegistration,
+    __WHATRUST_WINDOWS__: !!options.windows,
+    __whatrustPreferNative: !!options.preferNative,
+    __whatrustSound: options.sound !== false,
+    Audio: FakeAudio,
+    HTMLMediaElement: FakeMediaElement,
+    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+    __TAURI__: {
+      core: {
+        invoke(cmd, args) {
+          invocations.push({ cmd, args });
+          if (options.invokeRejects) {
+            return Promise.reject(new Error("Command " + cmd + " not allowed by ACL"));
+          }
+          // `invokeResult(cmd, args)` or an `invokeResults` table lets a test
+          // choose what a command returns.
+          if (options.invokeResult) return Promise.resolve(options.invokeResult(cmd, args));
+          return Promise.resolve(options.invokeResults && options.invokeResults[cmd]);
+        },
+      },
+    },
+  };
+  const sandboxGlobals = {
+    window,
+    document,
+    navigator: options.navigator || {},
+    console: { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)), error() {} },
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    // bridge.js prefers Uint8Array.fromBase64 and only falls back to atob. Node
+    // 22+ ships the static, which would silently bypass every atob injected
+    // below (and hide the forced decode failures). Tests that want the fast path
+    // pass their own constructor; everyone else gets one without the static.
+    Uint8Array: options.Uint8Array || AtobOnlyUint8Array,
+    Event: class {
+      constructor(type) {
+        this.type = type;
+      }
+    },
+    MutationObserver: class {
+      observe() {}
+    },
+    atob: options.atob || ((s) => Buffer.from(s, "base64").toString("binary")),
+    // unref'd, so bridge.js's 60s stream-GC timer cannot hold node open after the
+    // last assertion. The timers still fire — the tests themselves await ref'd
+    // sleeps, which keep the loop alive for as long as anything is being checked.
+    setTimeout: (fn, ms) => {
+      const t = setTimeout(fn, ms);
+      if (t && typeof t.unref === "function") t.unref();
+      return t;
+    },
+    clearTimeout,
+    setInterval: () => 0,
+  };
+  // Evaluate bridge.js with our stubs shadowing the real globals.
+  const params = Object.keys(sandboxGlobals);
+  const fn = new Function(...params, `"use strict";\n${bridgeSrc}`);
+  fn(...params.map((k) => sandboxGlobals[k]));
+  return {
+    window,
+    listeners,
+    document,
+    head,
+    mediaInput,
+    docInput,
+    menu,
+    logs,
+    warns,
+    invocations,
+    navigator: sandboxGlobals.navigator,
+    Uint8Array: sandboxGlobals.Uint8Array,
+    MediaElement: FakeMediaElement,
+  };
+}
+
+// Drive the feed the way window.rs stream_drop does.
+function feedFile(w, dropId, idx, name, type, content, { chunks = 1 } = {}) {
+  const buf = Buffer.from(content);
+  w.__whatrustDropFeed({ op: "begin", drop: dropId, file: idx, name, type, size: buf.length });
+  const per = Math.max(1, Math.ceil(buf.length / chunks));
+  for (let off = 0; off < buf.length || (buf.length === 0 && off === 0); off += per) {
+    const slice = buf.subarray(off, Math.min(off + per, buf.length));
+    w.__whatrustDropFeed({ op: "chunk", drop: dropId, file: idx, b64: slice.toString("base64") });
+    if (buf.length === 0) break;
+  }
+  w.__whatrustDropFeed({ op: "end", drop: dropId, file: idx });
+}
+
+// --- tests -------------------------------------------------------------------
+async function testMixedDropLosesNothing() {
+  console.log("mixed drop routes everything as documents (no silent loss)");
+  const { window: w, mediaInput, docInput } = makeHarness();
+  feedFile(w, 1, 0, "photo.jpg", "image/jpeg", "jpegbytes");
+  feedFile(w, 1, 1, "report.pdf", "application/pdf", "pdfbytes");
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 1, files: 2 });
+  assert(ack === "QUEUED:2", `commit acks both files (got ${ack})`);
+  await sleep(30);
+  assert(mediaInput.batches.length === 0, "media input untouched for a mixed drop");
+  assert(docInput.batches.length === 1, "document input received one batch");
+  const names = (docInput.batches[0] || []).map((f) => f.name).sort();
+  assert(
+    JSON.stringify(names) === JSON.stringify(["photo.jpg", "report.pdf"]),
+    `both files attached (got ${names})`
+  );
+}
+
+async function testPureMediaGoesToMediaInput() {
+  console.log("pure media drop routes to the Photos & Videos input");
+  const { window: w, mediaInput, docInput } = makeHarness();
+  feedFile(w, 2, 0, "clip.mp4", "video/mp4", "mp4bytes");
+  w.__whatrustDropFeed({ op: "commit", drop: 2, files: 1 });
+  await sleep(30);
+  assert(mediaInput.batches.length === 1, "media input received the video");
+  assert(docInput.batches.length === 0, "document input untouched");
+}
+
+async function testDistinctSameNamedFilesBothAttach() {
+  console.log("distinct files sharing a name + header prefix both attach");
+  const { window: w, mediaInput } = makeHarness();
+  const header = "A".repeat(64); // identical first 18+ bytes — old dedupe dropped one
+  feedFile(w, 3, 0, "same.mp4", "video/mp4", header + "-first");
+  feedFile(w, 3, 1, "same.mp4", "video/mp4", header + "-second");
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 3, files: 2 });
+  assert(ack === "QUEUED:2", `both distinct files queued (got ${ack})`);
+  await sleep(30);
+  assert(
+    mediaInput.batches.length === 1 && mediaInput.batches[0].length === 2,
+    "one change event carrying both files"
+  );
+}
+
+async function testChunkReassemblyByteExact() {
+  console.log("multi-chunk payload reassembles byte-for-byte");
+  const { window: w, mediaInput } = makeHarness();
+  const content = Buffer.alloc(10_000);
+  for (let i = 0; i < content.length; i++) content[i] = (i * 31 + 7) & 0xff;
+  feedFile(w, 4, 0, "big.mp4", "video/mp4", content, { chunks: 7 });
+  w.__whatrustDropFeed({ op: "commit", drop: 4, files: 1 });
+  await sleep(30);
+  const file = mediaInput.batches[0] && mediaInput.batches[0][0];
+  assert(!!file, "file arrived");
+  assert(file && file.size === content.length, "size preserved across chunks");
+  assert(file && file.bytes().equals(content), "bytes identical after reassembly");
+}
+
+function testHarnessIsolatesTheBase64Decoder() {
+  console.log("the harness does not leak the host's Uint8Array.fromBase64 into tests");
+  const { Uint8Array: U8 } = makeHarness();
+  assert(U8 !== Uint8Array, "harness shadows the host constructor");
+  assert(typeof U8.fromBase64 === "undefined", "default harness has no fromBase64 static");
+}
+
+async function testFromBase64FastPath() {
+  console.log("modern WebViews use Uint8Array.fromBase64 without the atob fallback");
+  let fastDecodes = 0;
+  class FastUint8Array extends Uint8Array {}
+  FastUint8Array.fromBase64 = (s) => {
+    fastDecodes++;
+    return Uint8Array.from(Buffer.from(s, "base64"));
+  };
+  const { window: w, mediaInput } = makeHarness({
+    Uint8Array: FastUint8Array,
+    atob: () => { throw new Error("atob fallback must not run"); },
+  });
+  const content = Buffer.from("native-fast-path");
+  feedFile(w, 13, 0, "fast.mp4", "video/mp4", content, { chunks: 3 });
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 13, files: 1 });
+  assert(ack === "QUEUED:1", `fast-path stream queued (got ${ack})`);
+  await sleep(30);
+  const file = mediaInput.batches[0]?.[0];
+  assert(fastDecodes === 3, `fromBase64 decoded all three stanzas (got ${fastDecodes})`);
+  assert(file?.bytes().equals(content), "fast-path bytes reassemble exactly");
+}
+
+async function testChunksDecodeBeforeCommit() {
+  console.log("base64 stanzas decode incrementally before commit");
+  let decodes = 0;
+  const { window: w, mediaInput } = makeHarness({
+    atob: (s) => {
+      decodes++;
+      return Buffer.from(s, "base64").toString("binary");
+    },
+  });
+  feedFile(w, 11, 0, "streaming.mp4", "video/mp4", "twelve-bytes", { chunks: 3 });
+  await sleep(30);
+  assert(decodes === 3, `all three stanzas decoded before commit (got ${decodes})`);
+  assert(mediaInput.batches.length === 0, "decoding alone does not inject a file");
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 11, files: 1 });
+  assert(ack === "QUEUED:1", `decoded stream still validates at commit (got ${ack})`);
+  await sleep(30);
+  assert(mediaInput.batches[0]?.[0]?.name === "streaming.mp4", "decoded file injects after commit");
+}
+
+async function testIncompleteFileSkippedAbortHonored() {
+  console.log("incomplete/aborted streams never produce a corrupt File");
+  const { window: w, mediaInput, docInput } = makeHarness();
+  // File 0: declared 100 bytes but only 10 sent (Rust died mid-stream) — no end op.
+  w.__whatrustDropFeed({ op: "begin", drop: 5, file: 0, name: "trunc.mp4", type: "video/mp4", size: 100 });
+  w.__whatrustDropFeed({ op: "chunk", drop: 5, file: 0, b64: b64("tenbytes!!") });
+  // File 1: explicitly aborted by the sender.
+  feedFile(w, 5, 1, "aborted.pdf", "application/pdf", "partial");
+  w.__whatrustDropFeed({ op: "abort", drop: 5, file: 1 });
+  // File 2: healthy.
+  feedFile(w, 5, 2, "good.pdf", "application/pdf", "gooddata");
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 5, files: 3 });
+  assert(ack === "QUEUED:1", `only the complete file is queued (got ${ack})`);
+  await sleep(30);
+  const all = [...mediaInput.batches.flat(), ...docInput.batches.flat()].map((f) => f.name);
+  assert(JSON.stringify(all) === JSON.stringify(["good.pdf"]), `only good.pdf attached (got ${all})`);
+}
+
+async function testCommittedDropsInjectSequentially() {
+  console.log("committed drops use one composer in queue order");
+  const slowPart = b64("one");
+  let delayed = false;
+  const { window: w, mediaInput } = makeHarness({
+    atob: (s) => {
+      // Make the first stanza exceed the 12 ms pump budget while another stanza
+      // remains, forcing its decode to yield. The second committed job then decodes
+      // quickly; the composer queue must still preserve commit order.
+      if (!delayed && s === slowPart) {
+        delayed = true;
+        const until = Date.now() + 20;
+        while (Date.now() < until) {}
+      }
+      return Buffer.from(s, "base64").toString("binary");
+    },
+  });
+  w.__whatrustDropFeed({ op: "begin", drop: 6, file: 0, name: "first.mp4", type: "video/mp4", size: 4 });
+  w.__whatrustDropFeed({ op: "chunk", drop: 6, file: 0, parts: [slowPart, b64("!")] });
+  w.__whatrustDropFeed({ op: "end", drop: 6, file: 0 });
+  w.__whatrustDropFeed({ op: "commit", drop: 6, files: 1 });
+  feedFile(w, 7, 0, "second.mp4", "video/mp4", "two");
+  w.__whatrustDropFeed({ op: "commit", drop: 7, files: 1 });
+  // First drop's composer stays "open" ~80ms; the queue must hold drop #7 until
+  // it closes, then inject — so wait past both cycles.
+  await sleep(400);
+  const seen = mediaInput.batches.map((b) => b.map((f) => f.name).join(","));
+  assert(
+    JSON.stringify(seen) === JSON.stringify(["first.mp4", "second.mp4"]),
+    `both drops injected in order (got ${JSON.stringify(seen)})`
+  );
+}
+
+async function testCommitWithoutDataAcksEmpty() {
+  console.log("commit with no completed files acks EMPTY (Rust can toast)");
+  const { window: w } = makeHarness();
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 8, files: 0 });
+  assert(ack === "EMPTY", `empty commit acks EMPTY (got ${ack})`);
+}
+
+async function testDecodeFailureBeforeCommitAcksErr() {
+  console.log("a pre-commit decode failure is delegated to Rust exactly once");
+  const { window: w, mediaInput, invocations } = makeHarness({
+    atob: () => { throw new Error("forced early decode failure"); },
+  });
+  feedFile(w, 12, 0, "broken-early.mp4", "video/mp4", "bytes");
+  await sleep(30);
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 12, files: 1 });
+  assert(ack === "ERR", `pre-commit failure acks ERR for Rust (got ${ack})`);
+  assert(mediaInput.batches.length === 0, "failed decode is never injected");
+  assert(
+    !invocations.some((x) => x.cmd === "notify"),
+    "JavaScript does not duplicate the Rust-side ERR notification"
+  );
+}
+
+async function testDecodeFailureNotifies() {
+  console.log("an asynchronous decode failure is visible to the user");
+  const { window: w, mediaInput, invocations } = makeHarness({
+    atob: () => { throw new Error("forced decode failure"); },
+  });
+  feedFile(w, 10, 0, "broken.mp4", "video/mp4", "bytes");
+  const ack = w.__whatrustDropFeed({ op: "commit", drop: 10, files: 1 });
+  assert(ack === "QUEUED:1", `valid stream is accepted into the queue (got ${ack})`);
+  await sleep(30);
+  assert(mediaInput.batches.length === 0, "failed decode is never injected");
+  assert(
+    invocations.some((x) => x.cmd === "notify" && /Não foi possível anexar/.test(x.args.body)),
+    "native failure notification is sent"
+  );
+}
+
+async function testMalformedMessagesAreRejected() {
+  console.log("malformed feed messages are rejected without throwing");
+  const { window: w } = makeHarness();
+  assert(w.__whatrustDropFeed(null) === "BADMSG", "null message");
+  assert(w.__whatrustDropFeed({ op: "chunk" }) === "BADMSG", "missing drop id");
+  assert(
+    w.__whatrustDropFeed({ op: "chunk", drop: 9, file: 0, b64: "AA==" }) === "NOFILE",
+    "chunk before begin"
+  );
+  assert(w.__whatrustDropFeed({ op: "wat", drop: 9 }) === "BADOP", "unknown op");
+}
+
+async function testNotificationsReachTheNativeNotifyCommand() {
+  console.log("page notifications (both APIs) reach the native notify command once");
+  const { window: w, invocations } = makeHarness();
+  new w.Notification("Alice", { body: "hello" });
+  const notifies = invocations.filter((x) => x.cmd === "notify");
+  assert(notifies.length === 1, "new Notification() forwards to notify");
+  assert(
+    notifies[0] && notifies[0].args.title === "Alice" && notifies[0].args.body === "hello",
+    "title and body are forwarded"
+  );
+  // The same alert again within the burst window is a duplicate, not a second toast.
+  new w.Notification("Alice", { body: "hello" });
+  assert(invocations.filter((x) => x.cmd === "notify").length === 1, "burst duplicate suppressed");
+  assert(w.Notification.permission === "granted", "Notification.permission reads granted");
+}
+
+async function testNotificationPictureIsForwardedAsPng() {
+  console.log("the sender's picture goes to notify as a small PNG, or the toast goes without it");
+  const { window: w, document: d, invocations } = makeHarness();
+  const fetched = [];
+  const drawn = [];
+  w.fetch = (url, opts) => {
+    fetched.push({ url, opts });
+    return Promise.resolve({ ok: true, blob: () => Promise.resolve({ type: "image/webp" }) });
+  };
+  w.createImageBitmap = () => Promise.resolve({ width: 200, height: 100, close() {} });
+  d.createElement = (tag) =>
+    tag === "canvas"
+      ? {
+          getContext: () => ({ drawImage: (...a) => drawn.push(a) }),
+          toDataURL: (type) => "data:" + type + ";base64,iVBORw0KGgo=",
+        }
+      : new FakeElement(tag);
+  new w.Notification("Bob", { body: "hi", icon: "blob:https://web.whatsapp.com/1234" });
+  await sleep(10);
+  const sent = invocations.filter((x) => x.cmd === "notify");
+  assert(sent.length === 1 && sent[0].args.icon === "iVBORw0KGgo=", "base64 PNG forwarded as icon");
+  assert(sent[0] && sent[0].args.title === "Bob" && sent[0].args.body === "hi", "title and body unchanged");
+  assert(fetched[0] && fetched[0].opts.credentials === "omit", "fetched without credentials");
+  // A 200x100 picture is cropped to its centre square and scaled to 96px.
+  assert(drawn[0] && drawn[0].slice(1).join() === "50,0,100,100,0,0,96,96", "centre square, 96px");
+  const logged = invocations.filter((x) => x.cmd === "dlog").map((x) => x.args.msg);
+  assert(logged.includes("notif path: icon blob ok"), "outcome logged by scheme only");
+  assert(!logged.some((m) => m.includes("1234")), "the picture's URL is never logged");
+
+  // Unloadable: the toast still goes out, just without a picture.
+  w.fetch = () => Promise.reject(new Error("blocked"));
+  new w.Notification("Carol", { body: "yo", icon: "https://pps.whatsapp.net/v/x.jpg" });
+  await sleep(10);
+  const carol = invocations.filter((x) => x.cmd === "notify" && x.args.title === "Carol");
+  assert(carol.length === 1 && !("icon" in carol[0].args), "notify without icon when it can't load");
+
+  // Anything but blob:, data: or https: is not fetched at all.
+  const before = fetched.length;
+  new w.Notification("Dan", { body: "x", icon: "file:///etc/passwd" });
+  assert(
+    invocations.some((x) => x.cmd === "notify" && x.args.title === "Dan" && !("icon" in x.args)),
+    "other schemes: sent at once, no picture"
+  );
+  assert(fetched.length === before, "other schemes are not fetched");
+}
+
+async function testPermissionsApiAgreesNotificationsAreGranted() {
+  console.log("navigator.permissions reports notifications granted, passes others through");
+  const asked = [];
+  const navigator = {
+    permissions: {
+      query(desc) {
+        asked.push(desc.name);
+        return Promise.resolve({ name: desc.name, state: "prompt" });
+      },
+    },
+  };
+  makeHarness({ navigator });
+  const n = await navigator.permissions.query({ name: "notifications" });
+  assert(n.state === "granted", `notifications state is granted (got ${n.state})`);
+  assert(asked.length === 0, "the engine is not asked about notifications");
+  const mic = await navigator.permissions.query({ name: "microphone" });
+  assert(mic.state === "prompt" && asked[0] === "microphone", "other permissions reach the engine");
+}
+
+async function testRefusedCommandsWarnOnceAndNeverThrow() {
+  console.log("a refused command is swallowed but leaves one console warning");
+  const { window: w, warns } = makeHarness({ invokeRejects: true });
+  new w.Notification("A", { body: "1" });
+  new w.Notification("B", { body: "2" });
+  await sleep(10);
+  const notifyWarns = warns.filter((m) => m.includes("notify was refused"));
+  assert(notifyWarns.length === 1, `one warning for notify (got ${notifyWarns.length})`);
+}
+
+async function testChromeShimsOnlyForAChromeUserAgent() {
+  console.log("Chrome client hints only when the UA claims Chrome (Safari on macOS stays Safari)");
+  const chromeNav = {
+    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+  };
+  const chrome = makeHarness({ navigator: chromeNav });
+  assert(chromeNav.userAgentData && chromeNav.userAgentData.platform === "Linux", "Chrome UA gets userAgentData");
+  assert(!!chrome.window.chrome, "Chrome UA gets window.chrome");
+  const safariNav = {
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+  };
+  const safari = makeHarness({ navigator: safariNav });
+  assert(safariNav.userAgentData === undefined, "Safari UA gets no userAgentData");
+  assert(safari.window.chrome === undefined, "Safari UA gets no window.chrome");
+}
+
+function toastsIn(document) {
+  const host = document.body.children.find((c) => c.attrs["data-whatrust"] === "downloads");
+  if (!host) return [];
+  return host.shadow.all().filter((e) => /\btoast\b/.test(e.className));
+}
+const buttonsOf = (toast) => toast.all().filter((e) => e.tagName === "BUTTON");
+
+async function testDownloadToastOffersOpenAndShowInFolder() {
+  console.log("a finished download shows a toast whose buttons send only its id");
+  const { window: w, document, invocations } = makeHarness();
+  const name = '<img src=x onerror="alert(1)">.pdf';
+  assert(w.__whatrustDownloadDone({ ok: true, id: 4, name, canOpen: true }) === true, "toast shown");
+  const [toast] = toastsIn(document);
+  assert(!!toast, "one toast in the page");
+  const texts = toast.all().map((e) => e.textContent);
+  assert(texts.includes("Download concluído") && texts.includes(name), "title and file name, as plain text");
+  const labels = buttonsOf(toast).map((b) => b.textContent);
+  assert(labels.includes("Abrir") && labels.includes("Mostrar na pasta"), `buttons: ${labels}`);
+  buttonsOf(toast).find((b) => b.textContent === "Abrir").click();
+  const call = invocations.find((x) => x.cmd === "open_download");
+  assert(call && call.args.id === 4 && Object.keys(call.args).length === 1, "Open sends just the id");
+  assert(toastsIn(document).length === 0, "the toast closes after a choice");
+}
+
+function testDownloadToastStylesheetIsWellFormed() {
+  console.log("the download toast stylesheet keeps every rule closed (issue #71)");
+  const { window: w, document } = makeHarness();
+  w.__whatrustDownloadDone({ ok: true, id: 1, name: "a.pdf", canOpen: true });
+  const host = document.body.children.find((c) => c.attrs["data-whatrust"] === "downloads");
+  const style = host && host.shadow.all().find((e) => e.tagName === "STYLE");
+  const css = style ? style.textContent : "";
+  // Each selector must start at brace depth 0. A stray "}" or an unclosed rule
+  // makes the CSS parser swallow the next rule, which is how the toast lost its
+  // dark background in 0.6.11.
+  let depth = 0, ok = true;
+  for (const ch of css) {
+    if (ch === "{") depth++;
+    else if (ch === "}") { depth--; if (depth < 0) ok = false; }
+  }
+  assert(ok && depth === 0, "braces balance");
+  for (const sel of [".toast{", ".text{", ".title{", "button{"]) {
+    const at = css.indexOf(sel);
+    assert(at >= 0, `${sel} present`);
+    let d = 0;
+    for (const ch of css.slice(0, at)) { if (ch === "{") d++; else if (ch === "}") d--; }
+    assert(d === 0, `${sel} is a top-level rule`);
+  }
+  // Each top-level rule body must be declarations only (no stray selector text
+  // after a closing brace inside the same rule).
+  assert(/\.stack\{[^{}]*font:14px[^{}]*\}/.test(css), ".stack keeps its font and width declarations");
+}
+
+async function testRiskyDownloadsAndFailures() {
+  console.log("programs only offer Show in folder; failures say so");
+  const { window: w, document, invocations } = makeHarness();
+  w.__whatrustDownloadDone({ ok: true, id: 9, name: "setup.exe", canOpen: false });
+  const [toast] = toastsIn(document);
+  const labels = buttonsOf(toast).map((b) => b.textContent);
+  assert(!labels.includes("Abrir"), "no Open button for a program");
+  buttonsOf(toast).find((b) => b.textContent === "Mostrar na pasta").click();
+  assert(invocations.some((x) => x.cmd === "reveal_download" && x.args.id === 9), "Show in folder sends the id");
+  w.__whatrustDownloadDone({ ok: false });
+  const [failed] = toastsIn(document);
+  assert(failed && /failed/.test(failed.className), "failure toast");
+  assert(failed.all().some((e) => e.textContent === "Falha no download"), "failure says so");
+  assert(buttonsOf(failed).every((b) => b.textContent !== "Abrir"), "nothing to open after a failure");
+  for (let i = 0; i < 5; i++) w.__whatrustDownloadDone({ ok: true, id: 20 + i, name: i + ".jpg", canOpen: true });
+  assert(toastsIn(document).length === 3, "at most three toasts stack up");
+}
+
+async function testNotificationSoundMutesAlertTones() {
+  console.log("notification sound off mutes WhatsApp's alert tones but not calls or chat media");
+  const { window: w, MediaElement } = makeHarness({ sound: false });
+
+  const tone = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/tone.mp3");
+  await tone.play();
+  assert(tone.muted === true, "the message tone is muted");
+  assert(tone.plays === 1, "play still runs, so the page sees no error");
+
+  const ring = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/ring.mp3");
+  ring.loop = true;
+  await ring.play();
+  assert(ring.muted === false, "a looped ringtone keeps its sound");
+
+  const media = new MediaElement();
+  await media.play();
+  assert(media.muted === false, "chat media (not created through Audio) is untouched");
+
+  const voice = new w.Audio("blob:https://web.whatsapp.com/1234");
+  await voice.play();
+  assert(voice.muted === false, "a voice note on a blob URL keeps its sound");
+
+  const attached = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/attached.mp3");
+  attached.isConnected = true;
+  await attached.play();
+  assert(attached.muted === false, "an Audio element in the page is untouched");
+}
+
+async function testNotificationSoundToggleIsLive() {
+  console.log("the notification-sound toggle applies to elements already created");
+  const { window: w } = makeHarness();
+  const tone = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/tone.mp3");
+  await tone.play();
+  assert(tone.muted === false, "sound on leaves the tone audible");
+  w.__whatrustSetNotificationSound(false);
+  assert(tone.muted === true, "turning it off mutes the existing element");
+  w.__whatrustSetNotificationSound(true);
+  assert(tone.muted === false, "turning it back on restores the element");
+  const next = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/next.mp3");
+  await next.play();
+  assert(next.muted === false, "later tones follow the new value");
+}
+
+async function testNotificationPathIsLoggedOnceWithoutContent() {
+  console.log("the notification path is logged once per path, never the content");
+  const registered = [];
+  const navigator = {
+    serviceWorker: { register: (url) => { registered.push(url); return Promise.resolve({}); } },
+  };
+  const { window: w, invocations } = makeHarness({ navigator });
+  new w.Notification("Alice", { body: "secret text" });
+  new w.Notification("Bob", { body: "more secret text" });
+  await navigator.serviceWorker.register("/serviceworker.js?v=2");
+  const paths = invocations.filter((x) => x.cmd === "dlog" && /^notif path:/.test(x.args.msg)).map((x) => x.args.msg);
+  assert(paths.filter((m) => /Notification\(\)/.test(m)).length === 1, `Notification() logged once (got ${paths})`);
+  assert(paths.some((m) => m === "notif path: service worker registered (/serviceworker.js)"), "service worker logged by path");
+  assert(registered[0] === "/serviceworker.js?v=2", "registration still goes through");
+  assert(!paths.some((m) => /secret|Alice|Bob/.test(m)), "no names or text in the log");
+}
+
+async function testUnreadReportsSayWhenThePageHasSettled() {
+  console.log("unread reports tell Rust whether the page is still syncing");
+  const { invocations } = makeHarness();
+  const first = invocations.find((x) => x.cmd === "set_unread");
+  assert(first && first.args.settled === false, "the first report after load is not settled");
+}
+
+async function testWindowsNativePreferenceAndFallback() {
+  let nativeCalls=0;
+  const healthy=makeHarness({windows:true,preferNative:true,nativeNotification:class {static permission="granted";constructor(){nativeCalls++;}}});
+  new healthy.window.Notification("one",{body:"same"});new healthy.window.Notification("two",{body:"same"});
+  assert(nativeCalls===2,"healthy native route owns delivery");
+  assert(!healthy.invocations.some(x=>x.cmd==="notify"),"page route does not duplicate native delivery");
+  const failed=makeHarness({windows:true,preferNative:true,nativeNotification:class {static permission="granted";constructor(){throw Error("permission");}}});
+  new failed.window.Notification("same",{body:"same"});new failed.window.Notification("same",{body:"same"});
+  assert(failed.invocations.filter(x=>x.cmd==="notify").length===2,"native rejection falls back without dropping distinct repeated text");
+}
+
+async function testNativePermissionAndAsyncErrorFallback() {
+  const denied=makeHarness({windows:true,preferNative:true,nativeNotification:class {static permission="denied";constructor(){throw Error("must not be used");}}});
+  new denied.window.Notification("permission denied",{body:"test"});
+  assert(denied.invocations.filter(x=>x.cmd==="notify").length===1,"missing real browser permission uses safe page route");
+  let fail;
+  const asynchronous=makeHarness({windows:true,preferNative:true,nativeNotification:class {static permission="granted";addEventListener(type,callback){if(type==="error")fail=callback;}}});
+  new asynchronous.window.Notification("async browser failure",{body:"test"});fail();
+  assert(asynchronous.invocations.filter(x=>x.cmd==="notify").length===1,"asynchronous native error reaches page fallback");
+  let requested=0;
+  makeHarness({windows:true,nativeNotification:class {static permission="default";static requestPermission(){requested++;return Promise.resolve("granted");}}});
+  await sleep(0);assert(requested===1,"requests actual browser permission for service-worker notifications");
+}
+
+async function testPersistentWindowsNotificationUsesOwnService() {
+  let originals=0;
+  const h=makeHarness({windows:true,preferNative:true,nativeNotification:class {static permission="granted";},serviceWorkerRegistration:class {showNotification(){originals++;return Promise.resolve();}getNotifications(){return Promise.resolve([]);}}});
+  await new h.window.ServiceWorkerRegistration().showNotification("persistent test",{body:"test"});
+  assert(originals===0,"persistent registration never waits for a non-persistent WebView2 event");
+  assert(h.invocations.filter(x=>x.cmd==="notify").length===1,"Windows registration notification reaches account-aware service exactly once");
+}
+
+async function testDelayedIconRetainsDetectionEpoch(){
+ const h=makeHarness({windows:true});h.window.__whatrustNotificationEpoch=7;
+ new h.window.Notification("late icon",{body:"test",icon:"https://example.com/icon.png"});
+ h.window.__whatrustNotificationEpoch=8;await sleep(0);
+ assert(h.invocations.find(c=>c.cmd==="notify").args.epoch===7,"icon conversion retains the event epoch from before locking");
+ const before=h.invocations.filter(c=>c.cmd==="notify").length;h.window.__whatrustLocked=true;
+ new h.window.Notification("while locked",{body:"test"});
+ assert(h.invocations.filter(c=>c.cmd==="notify").length===before,"locked page bridge does not forward message notifications");
+}
+
+function testScrollbarsAreThinAndTranslucent() {
+  console.log("scrollbars are restyled thin/translucent instead of the webview's white default");
+  const chromeNav = {
+    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+  };
+  const { head } = makeHarness({ navigator: chromeNav });
+  const styles = head.children.filter((e) => e.id === "__whatrust_scrollbars");
+  assert(styles.length === 1, `one scrollbar stylesheet injected (got ${styles.length})`);
+  const css = styles[0] ? styles[0].textContent : "";
+  assert(css.includes("*::-webkit-scrollbar{width:8px"), "scrollbar is 8px wide, not the thick system bar");
+  assert(css.includes("background:transparent"), "track is transparent, not an opaque white slab");
+  assert(css.includes("rgba(134,150,160,.45)"), "thumb is WhatsApp's muted grey at low alpha");
+  assert(css.includes("scrollbar-width:thin"), "standard scrollbar-width is thin too");
+  assert(!/background:#fff|background-color:#fff/.test(css), "no opaque white scrollbar colour");
+  // An initialization script can run before <head> exists: that must not throw.
+  const noHead = makeHarness({ head: false, navigator: chromeNav });
+  assert(!!noHead.window, "bridge loads when document.head is not there yet");
+  // macOS presents a Safari UA: WKWebView scrollers are native, so the page
+  // stylesheet is skipped entirely (Rust forces overlay scrollers instead).
+  const safariNav = {
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+  };
+  const safari = makeHarness({ navigator: safariNav });
+  assert(
+    safari.head.children.every((e) => e.id !== "__whatrust_scrollbars"),
+    "Safari UA gets no scrollbar stylesheet (native overlay scrollers instead)"
+  );
+}
+
+function keyEvent(o) {
+  const e = { key: "", code: "", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, isComposing: false, keyCode: 0, defaultPrevented: false, ...o };
+  e.preventDefault = () => { e.defaultPrevented = true; };
+  e.stopPropagation = () => { e.stopped = true; };
+  return e;
+}
+function press(h, o) {
+  const e = keyEvent(o);
+  for (const fn of h.listeners.keydown || []) fn(e);
+  return e;
+}
+const zooms = (h) => h.invocations.filter((c) => c.cmd === "zoom_step").map((c) => c.args.action);
+
+async function testZoomShortcuts() {
+  const h = makeHarness({ navigator: { platform: "Win32" } });
+  assert(press(h, { key: "=", ctrlKey: true }).defaultPrevented, "Ctrl+= is taken");
+  press(h, { key: "+", ctrlKey: true, shiftKey: true });
+  press(h, { key: "-", ctrlKey: true });
+  press(h, { key: "0", ctrlKey: true });
+  press(h, { key: "Add", code: "NumpadAdd", ctrlKey: true });
+  assert(zooms(h).join() === "in,in,out,reset,in", "Ctrl +/-/0 and numpad map to in/out/reset");
+  const before = h.invocations.length;
+  const passes = [
+    { key: "=" }, { key: "a", ctrlKey: true }, { key: "-", ctrlKey: true, altKey: true },
+    { key: "-", ctrlKey: true, shiftKey: true }, { key: "=", metaKey: true },
+    { key: "-", ctrlKey: true, isComposing: true }, { key: "-", ctrlKey: true, keyCode: 229 },
+  ].map((o) => press(h, o));
+  assert(passes.every((e) => !e.defaultPrevented) && h.invocations.length === before, "other keys, Alt/AltGr, Cmd on non-mac and IME composition are left alone");
+  const mac = makeHarness({ navigator: { platform: "MacIntel" } });
+  press(mac, { key: "=", metaKey: true });
+  press(mac, { key: "=", ctrlKey: true });
+  assert(zooms(mac).join() === "in", "Cmd zooms on macOS, bare Ctrl does not");
+}
+
+async function testAccountNumberKeys() {
+  const accounts = [{ id: "default" }, { id: "acct-1" }];
+  const h = makeHarness({ navigator: { platform: "Win32" }, invokeResults: { switcher_accounts: accounts } });
+  press(h, { key: "2", code: "Digit2", ctrlKey: true });
+  press(h, { key: "1", code: "Numpad1", ctrlKey: true });
+  press(h, { key: "3", code: "Digit3", ctrlKey: true });
+  for (const o of [{ code: "Digit1" }, { code: "Digit1", ctrlKey: true, shiftKey: true }, { code: "Digit1", ctrlKey: true, altKey: true }, { code: "Digit1", metaKey: true }])
+    press(h, { key: "1", ...o });
+  await sleep(0);
+  const switched = h.invocations.filter((c) => c.cmd === "switch_account").map((c) => c.args.id);
+  assert(switched.join() === "acct-1,default", "Ctrl+2 / Ctrl+Numpad1 open accounts 2 and 1; Ctrl+3 (no 3rd account) and other modifiers do nothing");
+  const one = makeHarness({ navigator: { platform: "Win32" }, invokeResults: { switcher_accounts: [{ id: "default" }] } });
+  press(one, { key: "1", code: "Digit1", ctrlKey: true });
+  await sleep(0);
+  assert(!one.invocations.some((c) => c.cmd === "switch_account"), "a single account never switches");
+  const mac = makeHarness({ navigator: { platform: "MacIntel" }, invokeResults: { switcher_accounts: accounts } });
+  press(mac, { key: "2", code: "Digit2", metaKey: true });
+  await sleep(0);
+  assert(mac.invocations.some((c) => c.cmd === "switch_account" && c.args.id === "acct-1"), "Cmd+2 on macOS");
+}
+
+async function testZoomWheelCoalesces() {
+  const h = makeHarness({ navigator: { platform: "Win32" } });
+  const wheel = (o) => { const e = keyEvent({ deltaY: 0, deltaMode: 0, ...o }); for (const fn of h.listeners.wheel || []) fn(e); return e; };
+  assert(!wheel({ deltaY: -100 }).defaultPrevented, "plain wheel scrolls normally");
+  const e = wheel({ deltaY: -100, ctrlKey: true });
+  for (let i = 0; i < 20; i++) wheel({ deltaY: -100, ctrlKey: true });
+  assert(e.defaultPrevented && zooms(h).join() === "in", "a ctrl+wheel burst is one zoom-in step");
+  await sleep(200);
+  wheel({ deltaY: 100, ctrlKey: true });
+  assert(zooms(h).join() === "in,out", "the next burst steps again, downwards");
+  await sleep(200);
+  wheel({ deltaY: 5, ctrlKey: true });
+  assert(zooms(h).length === 2, "tiny deltas below the threshold do not step");
+}
+
+async function testNativeBranchSendsNotificationIcon() {
+  console.log("native Notification: blob/https picture goes to notification_icon, never to notify");
+  let built = 0;
+  const h = makeHarness({ windows: true, preferNative: true, nativeNotification: class { static permission = "granted"; constructor() { built++; } } });
+  const { window: w, document: d, invocations } = h;
+  w.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({}) });
+  w.createImageBitmap = () => Promise.resolve({ width: 100, height: 100, close() {} });
+  d.createElement = (tag) =>
+    tag === "canvas"
+      ? { getContext: () => ({ drawImage() {} }), toDataURL: (t) => "data:" + t + ";base64,iVBORw0KGgo=" }
+      : new FakeElement(tag);
+  new w.Notification("Bob", { body: "hi", icon: "blob:https://web.whatsapp.com/1234" });
+  await sleep(20);
+  const sent = invocations.filter((x) => x.cmd === "notification_icon");
+  assert(built === 1, "the real Notification is still constructed");
+  assert(sent.length === 1 && sent[0].args.icon === "iVBORw0KGgo=", "PNG sent to notification_icon");
+  assert(sent[0].args.title === "Bob" && sent[0].args.body === "hi", "title/body identify the toast");
+  assert(!invocations.some((x) => x.cmd === "notify"), "page route does not duplicate native delivery");
+
+  w.fetch = () => Promise.reject(new Error("blocked"));
+  new w.Notification("Carol", { body: "yo", icon: "https://pps.whatsapp.net/v/x.jpg" });
+  await sleep(20);
+  const carol = invocations.filter((x) => x.cmd === "notification_icon" && x.args.title === "Carol");
+  assert(carol.length === 1 && carol[0].args.icon === null, "unloadable picture: icon null releases the held toast");
+
+  const before = invocations.filter((x) => x.cmd === "notification_icon").length;
+  new w.Notification("Dan", { body: "x", icon: "data:image/png;base64,AAAA" });
+  new w.Notification("Eve", { body: "x" });
+  await sleep(20);
+  assert(invocations.filter((x) => x.cmd === "notification_icon").length === before, "data:/no icon: Rust handles it, nothing sent");
+}
+
+// --- clipboard image paste ---------------------------------------------------
+// Fire a paste the way the webview does. WebKitGTK sends an image-only
+// clipboard as `{ types: [], files: [] }`.
+function paste(h, clipboardData) {
+  for (const fn of h.listeners.paste || []) fn({ clipboardData });
+}
+const pasteCalls = (h) => h.invocations.filter((c) => c.cmd === "paste_clipboard").length;
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+// Rust answers paste_clipboard with the image as base64 PNG, or "" for none.
+const PNG_B64 = PNG.toString("base64");
+
+async function testEmptyPasteAttachesTheClipboardImage() {
+  console.log("an empty paste (WebKitGTK image clipboard) attaches the image Rust reads");
+  const h = makeHarness({
+    invokeResult: (cmd) => (cmd === "paste_clipboard" ? PNG_B64 : undefined),
+  });
+  paste(h, { types: [], files: [] });
+  await sleep(150);
+  assert(pasteCalls(h) === 1, "asks Rust for the clipboard image once");
+  const batch = h.mediaInput.batches[0] || [];
+  assert(batch.length === 1, "one file reaches the photo input, not the document input");
+  assert(h.docInput.batches.length === 0, "nothing goes to the document input");
+  const f = batch[0];
+  assert(f && f.name === "image.png" && f.type === "image/png", "named image.png with type image/png");
+  assert(f && f.bytes().equals(PNG), "bytes arrive unchanged");
+}
+
+async function testBrowserCopiedImageAlsoUsesTheNativeRead() {
+  console.log('"Copy image" from a browser (text/html only) still reads the image natively');
+  const h = makeHarness({ invokeResult: () => PNG_B64 });
+  paste(h, { types: ["text/html"], files: [] });
+  await sleep(150);
+  assert(pasteCalls(h) === 1, "text/html without text/plain still asks Rust");
+}
+
+async function testCopiedFilesAreReadNatively() {
+  console.log("files copied in a file manager (text/uri-list hidden by WebKitGTK) are read natively");
+  // What WebKitGTK showed for a Nautilus copy of a PDF and a PNG: the type is
+  // listed, but the list itself is withheld.
+  const h = makeHarness({ invokeResult: () => "" });
+  paste(h, { types: ["text/uri-list"], files: [], getData: () => "" });
+  await sleep(150);
+  assert(pasteCalls(h) === 1, "asks Rust, which streams the files through the drop feed");
+  assert(h.mediaInput.batches.length === 0 && h.docInput.batches.length === 0, "the empty answer attaches nothing itself");
+}
+
+async function testPastesTheWebviewHandlesNeverReachRust() {
+  console.log("text pastes and pastes that already carry a file are left alone");
+  const h = makeHarness({ invokeResult: () => PNG_B64 });
+  paste(h, { types: ["text/plain"], files: [] });
+  paste(h, { types: ["text/html", "text/plain"], files: [] });
+  paste(h, { types: ["Files"], files: [new FakeFile([PNG], "image.png", { type: "image/png" })] });
+  paste(h, null);
+  await sleep(150);
+  assert(pasteCalls(h) === 0, "no native read for text, delivered files or a missing clipboardData");
+  assert(h.mediaInput.batches.length === 0, "nothing is attached a second time");
+}
+
+async function testNoClipboardImageOrRefusalAttachesNothing() {
+  console.log("an empty answer or a refused command attaches nothing");
+  const empty = makeHarness({ invokeResult: () => "" });
+  paste(empty, { types: [], files: [] });
+  const refused = makeHarness({ invokeRejects: true });
+  paste(refused, { types: [], files: [] });
+  await sleep(150);
+  assert(pasteCalls(empty) === 1 && pasteCalls(refused) === 1, "both asked Rust");
+  assert(empty.mediaInput.batches.length === 0, "no image on the clipboard: nothing attached");
+  assert(refused.mediaInput.batches.length === 0, "locked / background account: nothing attached");
+}
+
+// --- attach menu timing --------------------------------------------------------
+// The input appears only after the menu entry is clicked. The entry must be clicked
+// as soon as the menu renders, not after a 1 s wait for an input that never comes.
+async function testMenuEntryIsClickedAsSoonAsTheMenuRenders() {
+  console.log("lazily mounted input: the menu entry is clicked as soon as it renders");
+  for (const [kind, name, type, input, item] of [
+    ["media", "photo.png", "image/png", "mediaInput", "media item"],
+    ["document", "report.pdf", "application/pdf", "docInput", "document item"],
+  ]) {
+    const h = makeHarness({ lazyInputs: true, menuDelayMs: 30 });
+    const t0 = Date.now();
+    feedFile(h.window, 50, 0, name, type, "data");
+    h.window.__whatrustDropFeed({ op: "commit", drop: 50, files: 1 });
+    while (!h[input].batches.length && Date.now() - t0 < 2500) await sleep(10);
+    const took = Date.now() - t0;
+    assert(h[input].batches.length === 1, kind + ": the file reaches the " + kind + " input");
+    assert(took < 500, kind + ": attached in " + took + "ms (was over 1000ms)");
+    assert(h.menu.clicks.join(",") === "plus," + item, kind + ": opens the menu, then clicks only its entry");
+  }
+}
+
+async function testElementsOnThePageBeforeTheMenuAreNeverClicked() {
+  console.log("a loose selector match that predates the menu is never clicked");
+  // The menu renders slowly; meanwhile "Profile photo" already matches [aria-label*="hoto"].
+  const h = makeHarness({ lazyInputs: true, menuDelayMs: 200 });
+  feedFile(h.window, 51, 0, "photo.png", "image/png", "data");
+  h.window.__whatrustDropFeed({ op: "commit", drop: 51, files: 1 });
+  const t0 = Date.now();
+  while (!h.mediaInput.batches.length && Date.now() - t0 < 2500) await sleep(10);
+  assert(!h.menu.clicks.includes("profile photo"), "the profile photo button is left alone");
+  assert(h.mediaInput.batches.length === 1, "the photo still attaches once the menu renders");
+}
+
+const tests = [
+  testMenuEntryIsClickedAsSoonAsTheMenuRenders,
+  testElementsOnThePageBeforeTheMenuAreNeverClicked,
+  testEmptyPasteAttachesTheClipboardImage,
+  testBrowserCopiedImageAlsoUsesTheNativeRead,
+  testCopiedFilesAreReadNatively,
+  testPastesTheWebviewHandlesNeverReachRust,
+  testNoClipboardImageOrRefusalAttachesNothing,
+  testDownloadToastStylesheetIsWellFormed,
+  testScrollbarsAreThinAndTranslucent,
+  testZoomShortcuts,
+  testAccountNumberKeys,
+  testZoomWheelCoalesces,
+  testWindowsNativePreferenceAndFallback,
+  testNativePermissionAndAsyncErrorFallback,
+  testNativeBranchSendsNotificationIcon,
+  testPersistentWindowsNotificationUsesOwnService,
+  testDelayedIconRetainsDetectionEpoch,
+  testUnreadReportsSayWhenThePageHasSettled,
+  testNotificationPathIsLoggedOnceWithoutContent,
+  testDownloadToastOffersOpenAndShowInFolder,
+  testRiskyDownloadsAndFailures,
+  testChromeShimsOnlyForAChromeUserAgent,
+  testNotificationsReachTheNativeNotifyCommand,
+  testNotificationPictureIsForwardedAsPng,
+  testNotificationSoundMutesAlertTones,
+  testNotificationSoundToggleIsLive,
+  testPermissionsApiAgreesNotificationsAreGranted,
+  testRefusedCommandsWarnOnceAndNeverThrow,
+  testMixedDropLosesNothing,
+  testPureMediaGoesToMediaInput,
+  testDistinctSameNamedFilesBothAttach,
+  testChunkReassemblyByteExact,
+  testHarnessIsolatesTheBase64Decoder,
+  testFromBase64FastPath,
+  testChunksDecodeBeforeCommit,
+  testIncompleteFileSkippedAbortHonored,
+  testCommittedDropsInjectSequentially,
+  testCommitWithoutDataAcksEmpty,
+  testDecodeFailureBeforeCommitAcksErr,
+  testDecodeFailureNotifies,
+  testMalformedMessagesAreRejected,
+];
+
+for (const t of tests) {
+  await t();
+}
+if (failures > 0) {
+  console.error(`\n${failures} assertion(s) FAILED`);
+  process.exit(1);
+}
+console.log("\nall bridge tests passed");
