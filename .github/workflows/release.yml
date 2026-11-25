@@ -118,7 +118,15 @@ jobs:
         env:
           CEF_PATH: ${{ env.CEF_PATH }}
         run: |
-          cargo build --release --target ${{ matrix.target }}
+          set -o pipefail
+          cargo build --release --target ${{ matrix.target }} 2>&1 | tee "$RUNNER_TEMP/build.log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Compiler errors"
+            grep -E '^(error|warning: unused)' "$RUNNER_TEMP/build.log" | head -60 | while IFS= read -r line; do echo "::error::${line}"; done || true
+            echo "::endgroup::"
+            exit "$status"
+          fi
 
       - name: Package macOS
         if: runner.os == 'macOS'
