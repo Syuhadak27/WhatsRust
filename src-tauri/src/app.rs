@@ -82,14 +82,16 @@ impl WhatRustApp {
             use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 
             loop {
-                let status = event_loop.pump_app_events(Some(Duration::from_millis(4)), self);
+                let hidden = !state().lock().map(|s| s.visible).unwrap_or(true);
+                let tick = if hidden { 20 } else { 4 };
+                let status = event_loop.pump_app_events(Some(Duration::from_millis(tick)), self);
                 // Apply resize/scale notifications before pumping CEF so the
                 // browser paints at the correct size from the very first frame.
                 self.apply_resize();
                 // A single CefDoMessageLoopWork() call is only one iteration.
                 // Pump a few iterations per slice so loading/rendering stays
                 // responsive during startup without spinning an external loop.
-                for _ in 0..3 {
+                for _ in 0..(if hidden { 1 } else { 3 }) {
                     do_message_loop_work();
                 }
                 if matches!(status, PumpStatus::Exit(_)) {
@@ -167,7 +169,31 @@ impl WhatRustApp {
 
     fn toggle_visible(&mut self) {
         let visible = if let Ok(mut s) = state().lock() { s.visible = !s.visible; s.visible } else { true };
-        if let Some(w) = &self.window { w.set_visible(visible); }
+        self.apply_visibility(visible);
+    }
+
+    /// Show/hide the native window AND tell CEF. Without `was_hidden`, the
+    /// renderer keeps painting into a hidden NSView (RAM/CPU stay high), and
+    /// after `set_visible(true)` the compositor never restarts -> black screen.
+    fn apply_visibility(&mut self, visible: bool) {
+        if let Ok(mut s) = state().lock() { s.visible = visible; }
+        let browser = state().lock().ok().and_then(|s| s.browser.clone());
+        if !visible {
+            if let Some(w) = &self.window { w.set_visible(false); }
+            if let Some(host) = browser.and_then(|b| b.host()) { host.was_hidden(1); }
+        } else {
+            if let Some(w) = &self.window {
+                w.set_visible(true);
+                w.set_minimized(false);
+                w.focus_window();
+            }
+            if let Some(host) = browser.and_then(|b| b.host()) {
+                host.was_hidden(0);
+                host.was_resized();
+                host.notify_screen_info_changed();
+                host.set_focus(1);
+            }
+        }
     }
 
     /// Tell CEF about size/scale changes. All CEF calls happen here with the
@@ -241,8 +267,7 @@ impl ApplicationHandler for WhatRustApp {
             WindowEvent::CloseRequested => {
                 self.persist_window_state();
                 if self.settings.close_to_tray {
-                    if let Some(w) = &self.window { w.set_visible(false); }
-                    if let Ok(mut s) = state().lock() { s.visible = false; }
+                    self.apply_visibility(false);
                 } else {
                     if let Ok(mut s) = state().lock() { s.should_quit = true; }
                     event_loop.exit();

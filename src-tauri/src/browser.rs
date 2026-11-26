@@ -37,14 +37,38 @@ wrap_app! {
             command_line: Option<&mut CommandLine>,
         ) {
             if let Some(cmd) = command_line {
+                // NOTE: we deliberately do NOT pass
+                // disable-background-timer-throttling /
+                // disable-backgrounding-occluded-windows /
+                // disable-renderer-backgrounding. They pin the renderer at full
+                // power while the window is hidden, which is the main reason RAM
+                // and CPU never drop after "close to tray".
                 let switches = [
-                    "disable-background-timer-throttling",
-                    "disable-backgrounding-occluded-windows",
-                    "disable-renderer-backgrounding",
+                    // fewer processes / less duplicated memory
+                    "disable-site-isolation-trials",
+                    "disable-extensions",
+                    "disable-component-update",
+                    "disable-background-networking",
+                    "disable-sync",
+                    "no-pings",
+                    "disable-breakpad",
                 ];
                 for s in switches {
                     cmd.append_switch(Some(&CefString::from(s)));
                 }
+                cmd.append_switch_with_value(
+                    Some(&CefString::from("renderer-process-limit")),
+                    Some(&CefString::from("1")),
+                );
+                cmd.append_switch_with_value(
+                    Some(&CefString::from("disable-features")),
+                    Some(&CefString::from("IsolateOrigins,site-per-process,Translate,MediaRouter,OptimizationHints")),
+                );
+                // Cap V8 heap growth; WhatsApp Web stays well below this.
+                cmd.append_switch_with_value(
+                    Some(&CefString::from("js-flags")),
+                    Some(&CefString::from("--max-old-space-size=768 --optimize-for-size")),
+                );
                 cmd.append_switch_with_value(
                     Some(&CefString::from("autoplay-policy")),
                     Some(&CefString::from("no-user-gesture-required")),
